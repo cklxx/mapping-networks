@@ -39,8 +39,12 @@ from src.adapters import (  # noqa: E402
     target_modules,
 )
 from src.math_scorer import extract_answer, gold_answer, reward_of  # noqa: E402
+from src import costlib  # noqa: E402 — same cost hooks as experiments/cost_benchmark.py
 
 torch.manual_seed(0)
+
+# steps-to-target threshold: the first step whose 3-step trailing-mean reward reaches this.
+COST_TARGET_REWARD = 0.20
 
 # ---- RL / eval config (the validated 4B-MATH settings) ----
 G_SWEEP = [256, 2048]      # 256 = high-leverage low budget; 2048 = ResNet50 §5.4 size
@@ -128,17 +132,22 @@ def evaluate(model, tok, items, dev, label="", collect_cases=0):
 
 
 def train_grpo(model, tok, names, train_items, trainable, lr, dev, label, telem_fn=None, clamp_o=None):
-    """GRPO + KL leash + optional hard clamp. Returns (reward_curve, kl_curve, telem)."""
+    """GRPO + KL leash + optional hard clamp. Returns (reward_curve, kl_curve, telem, timer,
+    tokens_per_step). The timer + token count feed the cost hooks (src/costlib.py) so this
+    validated runner emits the SAME per-variant cost row as experiments/cost_benchmark.py."""
     model.train()
     opt = torch.optim.Adam(trainable, lr=lr)
     t0 = time.time()
     curve, kl_curve, telem = [], [], []
+    timer = costlib.StepTimer().start()
+    tok_acc = []  # total prompt+completion tokens the step's forwards saw (for FLOPs/step est)
     for step in range(MAX_STEPS):
         if time.time() - t0 > TIME_BUDGET_S:
             print(f"[{label}] time budget hit at step {step}", flush=True)
             break
         batch = [train_items[(step * B + i) % len(train_items)] for i in range(B)]
         step_r, nz_groups, kl_acc, did_backward = [], 0, [], False
+        step_tokens = 0
         opt.zero_grad()
         for q, gold in batch:
             prompt = build_prompt(tok, q)
@@ -155,6 +164,7 @@ def train_grpo(model, tok, names, train_items, trainable, lr, dev, label, telem_
                 nz_groups += 1
             adv = (rs - rs.mean()) / (rs.std() + 1e-4)
             for k in range(K):
+                step_tokens += pids.numel() + comps[k].numel()
                 lp, kl = comp_logp_and_kl(model, names, pids, comps[k], dev)
                 kl_acc.append(kl.item())
                 pg = -adv[k].to(dev).detach() * lp if adv[k].abs() >= 1e-6 else 0.0 * lp
@@ -170,11 +180,15 @@ def train_grpo(model, tok, names, train_items, trainable, lr, dev, label, telem_
         mkl = sum(kl_acc) / len(kl_acc) if kl_acc else 0.0
         curve.append(mr)
         kl_curve.append(mkl)
+        tok_acc.append(step_tokens)
+        timer.tick()
         tline = telem_fn(trainable) if telem_fn else ""
         telem.append(tline)
         print(f"[{label}] step {step:3d}  mean_reward={mr:.3f}  signal_groups={nz_groups}/{B}  "
-              f"mean_kl={mkl:.4f}  {tline}  elapsed={time.time()-t0:.0f}s", flush=True)
-    return curve, kl_curve, telem
+              f"mean_kl={mkl:.4f}  {tline}  step_s={timer.per_step[-1]:.1f}  "
+              f"elapsed={time.time()-t0:.0f}s", flush=True)
+    tokens_per_step = int(sum(tok_acc) / len(tok_acc)) if tok_acc else 0
+    return curve, kl_curve, telem, timer, tokens_per_step
 
 
 def o_telem(trainable):
@@ -204,6 +218,8 @@ def main():
                     help="HF model id or local path of the frozen base")
     ap.add_argument("--out", default="results/4b-math500/results.txt",
                     help="where to write the report")
+    ap.add_argument("--cost-out", default="results/cost-table.md",
+                    help="where to write the per-variant cost table (markdown)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--baseline-only", action="store_true",
                     help="measure only the base accuracy (headroom gate) and stop")
@@ -216,7 +232,8 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dt, trust_remote_code=True).to(dev)
     model.requires_grad_(False)
     nlayers = num_layers_of(model)
-    print(f"num_hidden_layers (from config) = {nlayers}", flush=True)
+    base_params = sum(p.numel() for p in model.parameters())  # for the FLOPs/step cost est
+    print(f"num_hidden_layers (from config) = {nlayers}  base_params={base_params:,}", flush=True)
 
     print(f"config: B={B} K={K} MAX_STEPS={MAX_STEPS} time_box={TIME_BUDGET_S}s MAX_NEW={MAX_NEW} "
           f"N_EVAL={N_EVAL} BETA_KL={BETA_KL} LR_O={LR_O} O_CLAMP={O_CLAMP} LORA_R={LORA_R} "
@@ -255,17 +272,21 @@ def main():
         return
 
     results = {}
+    cost_records = []  # per-variant cost rows (same hooks as experiments/cost_benchmark.py)
 
     # ---- Map-RL sweep ----
     for G in G_SWEEP:
         key = f"Map-G{G}"
         print(f"\n========== DIRECT MAP sweep G={G} ==========", flush=True)
         o_orig = [getattr(*get_parent(model, n)) for n in names]
+        costlib.reset_peak_vram(dev)
         params, total_out = install_direct_map(model, names, G)
         n_par = sum(p.numel() for p in params)
         print(f"[{key}] trainable params = {n_par}  (TOTAL_OUT={total_out})", flush=True)
-        curve, kl_curve, _ = train_grpo(model, tok, names, train_items, params, LR_O, dev,
-                                        key, telem_fn=o_telem, clamp_o=O_CLAMP)
+        curve, kl_curve, _, timer, tps = train_grpo(model, tok, names, train_items, params, LR_O, dev,
+                                                     key, telem_fn=o_telem, clamp_o=O_CLAMP)
+        cost_records.append(costlib.cost_record(
+            key, params, base_params, curve, timer, dev, tps, COST_TARGET_REWARD))
         final_mean_abs_o = params[0].detach().abs().mean().item()
         final_max_gate = (1.0 + ALPHA_MOD * params[0].detach()).abs().max().item()
         k_g, n_g, cases_g = evaluate(model, tok, eval_items, dev, label=key, collect_cases=N_CASES)
@@ -282,11 +303,14 @@ def main():
     # ---- LoRA-RL comparator ----
     print(f"\n========== LoRA-RL r={LORA_R} ==========", flush=True)
     o_orig = [getattr(*get_parent(model, n)) for n in names]
+    costlib.reset_peak_vram(dev)
     params = install_lora(model, names, LORA_R)
     n_par = sum(p.numel() for p in params)
     print(f"[LoRA-r{LORA_R}] trainable params = {n_par}", flush=True)
-    curve, kl_curve, _ = train_grpo(model, tok, names, train_items, params, LR_LORA, dev,
-                                    f"LoRA-r{LORA_R}", telem_fn=lora_telem)
+    curve, kl_curve, _, timer, tps = train_grpo(model, tok, names, train_items, params, LR_LORA, dev,
+                                                f"LoRA-r{LORA_R}", telem_fn=lora_telem)
+    cost_records.append(costlib.cost_record(
+        f"LoRA-r{LORA_R}", params, base_params, curve, timer, dev, tps, COST_TARGET_REWARD))
     k_l, n_l, cases_l = evaluate(model, tok, eval_items, dev, label=f"LoRA-r{LORA_R}", collect_cases=N_CASES)
     restore(model, names, o_orig)
     acc_l = k_l / n_l
@@ -365,6 +389,18 @@ def main():
     with open(args.out, "w") as f:
         f.write(report + "\n")
     print(f"\nwrote {args.out}", flush=True)
+
+    # ---- cost table (same hooks as experiments/cost_benchmark.py) ----
+    meta = dict(label=f"4B MATH-500 ({args.model})", model=args.model,
+                base_params=base_params, device=dev, target_reward=COST_TARGET_REWARD,
+                max_steps=MAX_STEPS,
+                tokens_per_step=int(cost_records[0]["base_flops_step"] / (6.0 * base_params))
+                if base_params else 0)
+    cost_table = costlib.render_cost_table(cost_records, meta)
+    os.makedirs(os.path.dirname(args.cost_out) or ".", exist_ok=True)
+    with open(args.cost_out, "w") as f:
+        f.write(cost_table + "\n")
+    print(f"wrote {args.cost_out}", flush=True)
 
 
 if __name__ == "__main__":
