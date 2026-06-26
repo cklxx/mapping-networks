@@ -1,0 +1,25 @@
+Phase 1 — Mapping Network mechanism on FashionMNIST (arXiv:2602.19134)
+target CNN P = 105,866 params, 15 epochs, MPS. mapping = z(d) -> tanh(W1 z) -> W2,
+W1/W2 fixed random; train z only. hypernet control = train W1/W2, z fixed.
+
+                trainable    test     gap
+baseline         105,866    0.8881   0.0147
+map d=256            256    0.7979   0.0083    (414x)
+map d=512            512    0.8200   0.0120    (207x)
+map d=1024         1,024    0.8407   0.0125    (103x)
+map d=2048         2,048    0.8547   0.0111    (52x)
+map d=4096         4,096    0.8594   0.0107    (26x)
+hypernet      27,167,232    0.8940   0.0255
+
+CONCLUSIONS
+1. Overfitting suppression from COMPRESSION — confirmed. Every mapping gap (0.8-1.25%)
+   < baseline 1.47%; the 27M-param HyperNetwork (same architecture) overfits worst
+   (2.55%). The control isolates it: fewer trainable params, not the architecture.
+2. Accuracy parity NOT reached with this lazy mapping (fixed random projection ~ Li et
+   al. 2018 intrinsic-dimension). Plateaus ~86% (d=4096), ~3pp under baseline. The
+   paper's weight-modulation + stability/smoothness/alignment regularizers (not
+   implemented here) are what they credit for closing it. High compression (414x, d=256)
+   costs more accuracy (79.8%) — a clear accuracy/compression tradeoff.
+
+-> Phase 2 (GSM8K math RL, §5.4 modulation of a PRETRAINED base) is the real target:
+   fine-tuning a good base is more forgiving than from-scratch generation.

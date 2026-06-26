@@ -1,0 +1,73 @@
+==============================================================================
+PHASE 2b (H20 CUDA) — DIRECT high-leverage §5.4 modulation on GSM8K RL
+==============================================================================
+config: B=8 K=4 steps<=50 time_box=35min/G MAX_NEW=256 N_EVAL=200 BETA_KL=0.02 LR_o=0.02 ALPHA_MOD=1.0 O_CLAMP=0.1 (gate in [0.90,1.10]) dtype=torch.bfloat16
+adapter: W'[c,:] = W[c,:] * (1 + alpha*o[group(c)]),  group(c)=c*G//TOTAL_OUT,  o init ZEROS (identity), trainable params = G
+measured coherence band (probe2b.py, non-uniform o): mean|o|<~0.05 (max_gate<~1.16) keeps reasoning; mean|o|>=0.10 -> degenerate loops / token salad.
+
+baseline (this run): 0.4200  (84/200)   CI [0.354, 0.489]   [phase2 ref 0.420]
+
+GSM8K greedy acc (n=200), Wilson 95% CI:
+  G=256   params=256   : acc=0.2450  (49/200)   CI [0.191, 0.309]   final_mean_KL(last5)=0.3440
+  G=2048  params=2048  : acc=0.2350  (47/200)   CI [0.182, 0.298]   final_mean_KL(last5)=0.7084
+
+  G=256 vs baseline: -0.1750  -> CIs DISJOINT (clears noise)
+  G=2048 vs baseline: -0.1850  -> CIs DISJOINT (clears noise)
+
+KL precondition (latent has leverage iff mean KL rises above ~0.05) + coherence band:
+  G=256: final_mean_KL=0.3440 -> RISES (leverage confirmed)   final_mean|o|=0.0669 max_gate=1.102 -> OUT-OF-BAND (likely collapsed)
+  G=2048: final_mean_KL=0.7084 -> RISES (leverage confirmed)   final_mean|o|=0.0806 max_gate=1.102 -> OUT-OF-BAND (likely collapsed)
+
+mean_reward curve G=256 (24 steps): 0.50 0.19 0.12 0.41 0.41 0.12 0.31 0.06 0.38 0.22 0.09 0.19 0.00 0.28 0.09 0.31 0.06 0.03 0.12 0.00 0.03 0.00 0.00 0.12
+mean_KL     curve G=256 (24 steps): 0.000 0.019 0.040 0.216 0.702 0.157 0.063 0.044 0.039 0.056 0.088 0.110 0.112 0.146 0.185 0.237 0.237 0.279 0.282 0.334 0.333 0.350 0.364 0.338
+mean_reward curve G=2048 (27 steps): 0.31 0.19 0.22 0.34 0.28 0.12 0.09 0.06 0.19 0.06 0.09 0.03 0.03 0.06 0.06 0.06 0.03 0.03 0.06 0.03 0.00 0.06 0.06 0.09 0.03 0.03 0.00
+mean_KL     curve G=2048 (27 steps): 0.000 0.189 0.269 0.337 0.474 0.479 0.570 0.526 0.641 0.548 0.508 0.761 0.550 0.702 0.505 0.481 0.639 0.709 0.665 0.511 0.593 0.746 0.823 0.770 0.585 0.744 0.620
+
+DECODED CASES (baseline):
+  --- case 1 ---
+  Q: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?
+  MODEL: Janet lays 16 eggs daily. She eats 3 for breakfast and bakes 4 muffins, totaling 7 items. This leaves 9 eggs for the market. Selling 9 eggs at $2 each yields $18. #### 18.
+  extracted='18'  gold='18'  CORRECT
+  --- case 2 ---
+  Q: A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?
+  MODEL: 1. Calculate total blue bolts: 2 bolts.
+2. Calculate total white bolts: 2 * 0.5 = 1 bolt.
+3. Sum both types: 2 + 1 = 3 bolts.
+#### 3
+  extracted='3'  gold='3'  CORRECT
+  --- case 3 ---
+  Q: Josh decides to try flipping a house.  He buys a house for $80,000 and then puts in $50,000 in repairs.  This increased the value of the house by 150%.  How much profit did he make?
+  MODEL: Josh bought the house for $80,000 and spent $50,000 on repairs, totaling $130,000. The house's value increased by 150%, meaning it is now worth $200,000. His profit is the difference between the new value and the total cost: $200,000 - $130,000 = $70,000. #### 70000
+  extracted='70000'  gold='70000'  CORRECT
+
+DECODED CASES (Map-G256):
+  --- case 1 ---
+  Q: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?
+  MODEL: Janet lays 16 eggs daily. Breakfast costs $3, muffins cost $4, and market earnings are $2 per egg. Total daily expenses: $3 + $4 = $7. Daily earnings: 16 eggs × $2/egg = $32. Daily profit: $32 - $7 = $25. #### $25.
+  extracted=None  gold='18'  WRONG
+  --- case 2 ---
+  Q: A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?
+  MODEL: The robe requires 2 bolts of blue fiber and half of that amount, which is 1 bolt of blue fiber. Total blue bolts = 2. Half of blue bolts = 1. Half of blue bolts + 1 bolt of white fiber = 1 + 1 = 2 bolts. Total bolts = 2. #### 2.
+  extracted='2'  gold='3'  WRONG
+  --- case 3 ---
+  Q: Josh decides to try flipping a house.  He buys a house for $80,000 and then puts in $50,000 in repairs.  This increased the value of the house by 150%.  How much profit did he make?
+  MODEL: Josh bought the house for $80,000. After repairs, the house's value increased by 150%, meaning the new value is $80,000 + ($80,000 × 1.5) = $1,200,000. The profit is the difference between the new value and the original cost: $1,200,000 - $80,000 = $1,120,000. #### $1,120,000.
+  extracted=None  gold='70000'  WRONG
+
+DECODED CASES (Map-G2048):
+  --- case 1 ---
+  Q: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?
+  MODEL: Janet lays 16 eggs per day. She eats 3 for breakfast daily, leaving 13 for sale. Selling 13 eggs at $2 each yields $26. Total daily income is $26. #### 26
+  extracted='26'  gold='18'  WRONG
+  --- case 2 ---
+  Q: A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?
+  MODEL: 1. 1. 1.
+#### 1.5.
+
+**1.5**
+  extracted='1.5'  gold='3'  WRONG
+  --- case 3 ---
+  Q: Josh decides to try flipping a house.  He buys a house for $80,000 and then puts in $50,000 in repairs.  This increased the value of the house by 150%.  How much profit did he make?
+  MODEL: Josh bought the house for $80,000 and added repairs totaling $50,000, resulting in a purchase price of $130,000. The house's value increased by 150%, making the new purchase price $165,000. His profit is $65,000. #### 65000
+  extracted='65000'  gold='70000'  WRONG
+==============================================================================
