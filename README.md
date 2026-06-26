@@ -85,30 +85,81 @@ Earlier 0.8B / GSM8K explorations were negative — a model/task limit (thin coh
 band + an at-ceiling task), not a limit of the idea. Detailed in
 [`docs/research-plan.md`](docs/research-plan.md#what-didnt-work-and-why).
 
-## Quickstart
+## The cost story (the #1 deliverable)
+
+The point of an 8000×-smaller adapter is **cost**, so the project measures it directly, per
+variant: trainable params, peak VRAM, **steps-to-target** (the convergence number),
+wall-clock, FLOPs/step, and **GPU-hours**. The full table —
+[`results/cost-table.md`](results/cost-table.md) — is emitted by
+[`experiments/cost_benchmark.py`](experiments/cost_benchmark.py) and by the validated
+runner itself (same hooks, in [`src/costlib.py`](src/costlib.py)).
+
+The headline question it answers: **is the modulation cheaper in GPU-hours, or only in
+adapter SIZE + optimizer VRAM?** The mechanism makes this sharp: the frozen base's backward
+dominates every step, so the adapter's own FLOPs (LoRA's two matmuls vs the gate's
+element-wise scale) are a rounding error — **compute/step is ≈equal across adapters**.
+Therefore GPU-hours ≈ steps-to-target × wall-per-step, and the only way the modulation wins
+on GPU-hours is by *converging in fewer steps*. So the a-priori split is: adapter size
+(~10⁴× smaller — certain), optimizer VRAM (smaller, grows with model size), compute/step
+(≈LoRA), **GPU-hours (decided by steps-to-target — TBD by the GPU run)**. The benchmark also
+runs a **LoRA learning-rate sweep** and reports LoRA's *best* variant, so "beats LoRA" is
+not an artifact of the under-tuned `lr=1e-4` the first run used.
+
+## Reproduce
+
+Clone → install → fetch → smoke (CPU, minutes) → full (1 GPU, ~2h) → expected output.
 
 ```bash
-pip install -r requirements.txt   # torch, transformers, datasets, matplotlib
+git clone <repo> && cd mapping-networks
+pip install -r requirements.txt        # pinned: torch, transformers, datasets, accelerate, matplotlib, numpy, torchvision
 
-# Reproduce the 4B MATH-500 comparison (needs a CUDA GPU; ~2-3 hrs at the default budget):
-python experiments/math500_rl.py --model Qwen/Qwen3-4B --out results/4b-math500/results.txt
+# 1) SMOKE — verify the whole pipeline on CPU/Mac in minutes (tiny random transformer,
+#    no model download). MUST produce results/cost-table.md before you spend a GPU:
+./scripts/reproduce.sh --smoke
 
-# Just measure the base (the headroom gate — must be well below 0.85):
-python experiments/math500_rl.py --model Qwen/Qwen3-4B --baseline-only
-
-# Regenerate the figures from the saved telemetry:
-python results/4b-math500/plot_curves.py
+# 2) FULL — the headline 4B MATH-500 experiment (needs ONE CUDA GPU, ~2h / 4 variants):
+./scripts/reproduce.sh                  # fetches MATH-500 + Qwen3-4B, runs, writes outputs
 ```
+
+**Data + model ids** (documented in [`scripts/reproduce.sh`](scripts/reproduce.sh)):
+dataset `HuggingFaceH4/MATH-500` (HF datasets, split=test), model `Qwen/Qwen3-4B` (HF hub).
+Override with `MODEL=<id-or-path> ./scripts/reproduce.sh`.
+
+**Expected output** of the full run:
+[`results/4b-math500/results.txt`](results/4b-math500/results.txt) (accuracy + Wilson CIs +
+KL telemetry + decoded cases), [`results/cost-table.md`](results/cost-table.md) (the
+per-variant cost table), and the two figures. The smoke run emits a *tiny* cost-table whose
+absolute numbers are meaningless — it only proves the instrumentation captures all four
+axes and the table renders; the 4B GPU rows are written as a clearly-marked **PENDING**
+block carrying the a-priori predictions until the GPU run fills them.
+
+**Hardware**: the 4B run was validated on a single H20 (80 GB); any ≥24 GB CUDA GPU should
+fit the frozen bf16 4B + the small RL rollout. The smoke run is CPU-only.
+
+**Caveat on absolute numbers**: a few MATH-500 gold strings carry a transcription artifact
+(see "Honest caveats" above), so treat the *cross-variant deltas* (e.g. +19pp) as the
+result, not the absolute accuracies. The cost table's absolute GPU-hours likewise depend on the exact GPU /
+budget; the *ratio* (modulation vs best-LoRA, driven by steps-to-target) is the portable
+claim.
 
 The adapter math lives in [`src/adapters.py`](src/adapters.py) (`install_direct_map` for
 the gate, `install_lora` for the baseline); the MATH scorer in
-[`src/math_scorer.py`](src/math_scorer.py). Both are reusable from new experiments.
+[`src/math_scorer.py`](src/math_scorer.py); the cost hooks in
+[`src/costlib.py`](src/costlib.py). All are reusable from new experiments. The full
+validation history (every negative run that led here) is preserved under
+[`experiments/archive/`](experiments/archive/README.md).
 
 ## Layout
 
 ```
-src/          modulation gate + LoRA baseline (adapters.py), MATH-500 scorer (math_scorer.py)
-experiments/  math500_rl.py — the validated 4B MATH-500 RL runner
-results/      4b-math500/ — raw report + training-curve & accuracy figures + plot script
+src/          adapters.py     — modulation gate + LoRA baseline (single source of the adapter math)
+              math_scorer.py  — MATH-500 \boxed{} extraction + equivalence scoring
+              costlib.py      — cost hooks (params / VRAM / steps-to-target / wall / FLOPs / GPU-hours)
+experiments/  math500_rl.py     — the validated 4B MATH-500 RL runner (emits results.txt + cost-table.md)
+              cost_benchmark.py — per-variant cost sweep + LoRA lr-sweep; --smoke runs on CPU
+              archive/          — the FULL validation history (every negative run) + raw evidence + index
+results/      4b-math500/     — raw report + training-curve & accuracy figures + plot script
+              cost-table.md   — the per-variant cost table (smoke-filled; 4B rows PENDING the GPU run)
+scripts/      reproduce.sh    — one entry point: install -> fetch -> smoke (CPU) / full (1 GPU)
 docs/         research-plan.md — function-class boundary, scaling, fair LoRA head-to-head
 ```
