@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# venv / env
+venv/
+.venv/
+env/
+.env
+
+# model weights / checkpoints / large tensors
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# logs / scratch
+*.log
+.DS_Store
