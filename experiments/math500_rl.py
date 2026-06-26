@@ -18,6 +18,7 @@ Usage:
     python experiments/math500_rl.py --baseline-only      # just measure the base (headroom gate)
 """
 import argparse
+import json
 import math
 import os
 import sys
@@ -51,7 +52,10 @@ G_SWEEP = [256, 2048]      # 256 = high-leverage low budget; 2048 = ResNet50 §5
 LR_O = 0.01                # 4B-MATH has signal; between 0.8B-hot 0.02 and 4B-GSM8K-frozen 0.002
 O_CLAMP = 0.10             # HARD CLAMP |o| <= 0.10 after each step (4B coherent band ~0.10-0.15)
 LORA_R = 8
-LR_LORA = 1e-4             # NOTE: under-tuned for a fair head-to-head — see docs/research-plan.md
+LR_LORA = 1e-4             # legacy single-lr default (kept for reference); the run sweeps below
+# FAIR head-to-head: sweep the LoRA learning rate and report LoRA's BEST variant, so
+# "modulation beats LoRA" is not an artifact of an under-tuned lr=1e-4 (docs/research-plan.md §2).
+LORA_LR_SWEEP = [1e-4, 3e-4, 1e-3, 3e-3]
 B, K = 6, 4                # GRPO: questions/step, completions/question
 MAX_NEW, MAX_NEW_EVAL = 512, 1024   # train rollout short (reward variance); eval long (no truncation)
 EVAL_BATCH = 16
@@ -300,32 +304,45 @@ def main():
                             acc=acc_g, ci=ci_g, final_kl=final_kl, cases=cases_g,
                             mean_abs_o=final_mean_abs_o, max_gate=final_max_gate)
 
-    # ---- LoRA-RL comparator ----
-    print(f"\n========== LoRA-RL r={LORA_R} ==========", flush=True)
-    o_orig = [getattr(*get_parent(model, n)) for n in names]
-    costlib.reset_peak_vram(dev)
-    params = install_lora(model, names, LORA_R)
-    n_par = sum(p.numel() for p in params)
-    print(f"[LoRA-r{LORA_R}] trainable params = {n_par}", flush=True)
-    curve, kl_curve, _, timer, tps = train_grpo(model, tok, names, train_items, params, LR_LORA, dev,
-                                                f"LoRA-r{LORA_R}", telem_fn=lora_telem)
-    cost_records.append(costlib.cost_record(
-        f"LoRA-r{LORA_R}", params, base_params, curve, timer, dev, tps, COST_TARGET_REWARD))
-    k_l, n_l, cases_l = evaluate(model, tok, eval_items, dev, label=f"LoRA-r{LORA_R}", collect_cases=N_CASES)
-    restore(model, names, o_orig)
-    acc_l = k_l / n_l
-    ci_l = wilson_ci(k_l, n_l)
-    final_kl = sum(kl_curve[-5:]) / max(1, len(kl_curve[-5:])) if kl_curve else 0.0
-    print(f"[LoRA-r{LORA_R}] MATH-500 acc = {acc_l:.4f} ({k_l}/{n_l})  "
-          f"CI [{ci_l[0]:.3f},{ci_l[1]:.3f}]  final_mean_KL(last5)={final_kl:.4f}", flush=True)
-    results[f"LoRA-r{LORA_R}"] = dict(kind="lora", n_par=n_par, curve=curve, kl_curve=kl_curve,
-                                      k=k_l, n=n_l, acc=acc_l, ci=ci_l, final_kl=final_kl, cases=cases_l)
+    # ---- LoRA-RL comparator — FAIR lr-sweep, report BEST (docs/research-plan.md §2) ----
+    lora_variants = []  # (key, lr) in run order, for the report
+    for lr_lora in LORA_LR_SWEEP:
+        key = f"LoRA-r{LORA_R}-lr{lr_lora:g}"
+        print(f"\n========== LoRA-RL r={LORA_R} lr={lr_lora:g} ==========", flush=True)
+        o_orig = [getattr(*get_parent(model, n)) for n in names]
+        costlib.reset_peak_vram(dev)
+        params = install_lora(model, names, LORA_R)
+        n_par = sum(p.numel() for p in params)
+        print(f"[{key}] trainable params = {n_par}", flush=True)
+        curve, kl_curve, _, timer, tps = train_grpo(model, tok, names, train_items, params, lr_lora, dev,
+                                                    key, telem_fn=lora_telem)
+        cost_records.append(costlib.cost_record(
+            key, params, base_params, curve, timer, dev, tps, COST_TARGET_REWARD))
+        k_l, n_l, cases_l = evaluate(model, tok, eval_items, dev, label=key, collect_cases=N_CASES)
+        restore(model, names, o_orig)
+        acc_l = k_l / n_l
+        ci_l = wilson_ci(k_l, n_l)
+        final_kl = sum(kl_curve[-5:]) / max(1, len(kl_curve[-5:])) if kl_curve else 0.0
+        print(f"[{key}] MATH-500 acc = {acc_l:.4f} ({k_l}/{n_l})  "
+              f"CI [{ci_l[0]:.3f},{ci_l[1]:.3f}]  final_mean_KL(last5)={final_kl:.4f}", flush=True)
+        results[key] = dict(kind="lora", lr=lr_lora, n_par=n_par, curve=curve, kl_curve=kl_curve,
+                            k=k_l, n=n_l, acc=acc_l, ci=ci_l, final_kl=final_kl, cases=cases_l)
+        lora_variants.append(key)
+
+    # pick BEST LoRA: highest accuracy, tie-break fewest steps-to-target then final KL.
+    def lora_score(key):
+        r = results[key]
+        s2t = costlib.steps_to_target(r["curve"], COST_TARGET_REWARD)
+        return (-r["acc"], s2t if s2t is not None else 10**9, -r["final_kl"])
+    best_lora_key = min(lora_variants, key=lora_score)
+    results[best_lora_key]["is_best_lora"] = True
+    print(f"\n[best-LoRA] -> {best_lora_key} (acc={results[best_lora_key]['acc']:.4f})", flush=True)
 
     # ---- report ----
     def overlap(a, b):
         return a[0] <= b[1] and b[0] <= a[1]
 
-    order = [f"Map-G{G}" for G in G_SWEEP] + [f"LoRA-r{LORA_R}"]
+    order = [f"Map-G{G}" for G in G_SWEEP] + lora_variants
     lines = ["=" * 78,
              "MATH-500 — per-group modulation vs LoRA on a frozen Qwen3-4B (RL)",
              "=" * 78,
@@ -333,7 +350,8 @@ def main():
              f"num_hidden_layers (config) = {nlayers}   target *_proj linears = {len(names)}",
              f"config: B={B} K={K} steps<={MAX_STEPS} time_box={TIME_BUDGET_S//60}min/variant "
              f"MAX_NEW={MAX_NEW} N_EVAL={N_EVAL} BETA_KL={BETA_KL} LR_o={LR_O} O_CLAMP={O_CLAMP} "
-             f"LR_lora={LR_LORA} ALPHA_MOD={ALPHA_MOD} dtype={dt}",
+             f"LoRA_lr_sweep={LORA_LR_SWEEP} best_LoRA={best_lora_key} "
+             f"ALPHA_MOD={ALPHA_MOD} dtype={dt}",
              "Map adapter: W'[c,:] = W[c,:] * (1 + alpha*o[group(c)]), o init ZEROS (identity), "
              f"HARD CLAMP |o|<={O_CLAMP}, params = G",
              f"LoRA adapter: W' = W + (alpha/r) B A, r={LORA_R}, B init zeros (identity)",
@@ -345,8 +363,9 @@ def main():
              f"MATH-500 greedy acc (n={N_EVAL}), Wilson 95% CI:"]
     for key in order:
         r = results[key]
-        lines.append(f"  {key:<10s} params={r['n_par']:<8d}: acc={r['acc']:.4f}  ({r['k']}/{r['n']})   "
-                     f"CI [{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]   final_mean_KL(last5)={r['final_kl']:.4f}")
+        mark = "  ** BEST LoRA **" if r.get("is_best_lora") else ""
+        lines.append(f"  {key:<18s} params={r['n_par']:<8d}: acc={r['acc']:.4f}  ({r['k']}/{r['n']})   "
+                     f"CI [{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]   final_mean_KL(last5)={r['final_kl']:.4f}{mark}")
     lines.append("")
     for key in order:
         r = results[key]
@@ -391,6 +410,10 @@ def main():
     print(f"\nwrote {args.out}", flush=True)
 
     # ---- cost table (same hooks as experiments/cost_benchmark.py) ----
+    # Mark the chosen best-LoRA row in the cost table for the fair head-to-head.
+    for rec in cost_records:
+        if rec["variant"] == best_lora_key:
+            rec["variant"] = rec["variant"] + "  ** BEST LoRA **"
     meta = dict(label=f"4B MATH-500 ({args.model})", model=args.model,
                 base_params=base_params, device=dev, target_reward=COST_TARGET_REWARD,
                 max_steps=MAX_STEPS,
@@ -401,6 +424,38 @@ def main():
     with open(args.cost_out, "w") as f:
         f.write(cost_table + "\n")
     print(f"wrote {args.cost_out}", flush=True)
+
+    # ---- structured JSON (everything needed for charts + the README/cost-table edits) ----
+    payload = dict(
+        model=args.model, device=str(dev), dtype=str(dt), num_hidden_layers=nlayers,
+        target_proj_linears=len(names), base_params=base_params,
+        config=dict(B=B, K=K, max_steps=MAX_STEPS, time_budget_s=TIME_BUDGET_S,
+                    max_new=MAX_NEW, n_eval=N_EVAL, beta_kl=BETA_KL, lr_o=LR_O,
+                    o_clamp=O_CLAMP, lora_r=LORA_R, alpha_mod=ALPHA_MOD,
+                    g_sweep=G_SWEEP, lora_lr_sweep=LORA_LR_SWEEP,
+                    cost_target_reward=COST_TARGET_REWARD),
+        baseline=dict(acc=acc_base, k=k_base, n=n_base, ci=list(ci_base),
+                      cases=[dict(problem=q, model=t, pred=p, gold=g) for q, t, p, g in cases_base]),
+        best_lora_key=best_lora_key,
+        order=order,
+        variants={},
+        cost_records=cost_records,
+    )
+    for key in order:
+        r = results[key]
+        s2t = costlib.steps_to_target(r["curve"], COST_TARGET_REWARD)
+        payload["variants"][key] = dict(
+            kind=r["kind"], lr=r.get("lr"), n_par=r["n_par"], acc=r["acc"],
+            k=r["k"], n=r["n"], ci=list(r["ci"]), final_kl=r["final_kl"],
+            steps_to_target=s2t, is_best_lora=bool(r.get("is_best_lora")),
+            mean_abs_o=r.get("mean_abs_o"), max_gate=r.get("max_gate"),
+            reward_curve=r["curve"], kl_curve=r["kl_curve"],
+            cases=[dict(problem=q, model=t, pred=p, gold=g) for q, t, p, g in r["cases"]],
+        )
+    json_out = os.path.join(os.path.dirname(args.out) or ".", "results.json")
+    with open(json_out, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"wrote {json_out}", flush=True)
 
 
 if __name__ == "__main__":
