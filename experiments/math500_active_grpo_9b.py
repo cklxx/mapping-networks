@@ -668,6 +668,7 @@ def main():
     ap.add_argument("--eval-n", type=int, default=0)
     ap.add_argument("--eval-batch", type=int, default=1)
     ap.add_argument("--eval-after-train", action="store_true")
+    ap.add_argument("--skip-baseline-eval", action="store_true")
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--target-updates", type=int, default=20)
@@ -746,7 +747,7 @@ def main():
     adapter_sanity(model, tok, names, bank["active"], dev, args.out_dir, args.lora_r)
 
     baseline_eval = None
-    if args.eval_after_train and args.eval_items:
+    if args.eval_after_train and args.eval_items and not args.skip_baseline_eval:
         baseline_eval = evaluate(
             model, tok, args.eval_items, dev, args.max_new_eval, args.eval_batch,
             gen_extra, stop_ids, "baseline",
