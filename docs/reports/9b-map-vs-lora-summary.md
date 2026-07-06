@@ -1,77 +1,137 @@
-# 9B Map vs LoRA 实验结论
+# 9B Map vs LoRA：模型参数、实验设计与优化方案
 
-## 结论
+## 模型与硬件
 
-在当前 9B / MATH-500 / active-bank RL 设置下，优化后的 Map-G2048 在 30 update、eval_n=200 的实验中优于 LoRA-r8：
+| 项目 | 值 |
+|---|---|
+| Base model | `01-ai/Yi-1.5-9B-Chat` |
+| Architecture | LLaMA-style causal LM |
+| Base params | 8,829,407,232 |
+| dtype | bfloat16 |
+| layers | 48 |
+| hidden_size | 4096 |
+| intermediate_size | 11008 |
+| attention heads | 32 |
+| KV heads | 4 |
+| vocab_size | 64000 |
+| max_position_embeddings | 4096 |
+| rope_theta | 5,000,000 |
+| GPU | Colab G4 / RTX PRO 6000 Blackwell / 94.97GB |
 
-| 维度 | Baseline | Map-G2048 | LoRA-r8 | 结论 |
-|---|---:|---:|---:|---|
-| Eval accuracy | 40.5% | 48.0% | 42.0% | Map 高 LoRA 6pp |
-| Wilson CI | [33.9, 47.4] | [41.2, 54.9] | [35.4, 48.9] | CI 重叠，不能当统计终局 |
-| Train updates / skip | - | 30 / 5 | 30 / 5 | 相同 |
-| Train elapsed | - | 1358.7s | 1372.0s | 基本相同，Map 略快 |
-| Mean step | - | 10.04s | 10.42s | Map 略快 |
-| Tokens/s | - | 278.4 | 247.5 | Map +12% |
-| Trainable params | - | 2,048 | 27,230,208 | Map 少 13,296x |
-| Checkpoint size est. | - | 4KB | 51.9MB | Map 小 13,296x |
+## Adapter 定义
 
-## 为什么之前性能差
+| 项目 | Map-G2048 | LoRA-r8 |
+|---|---:|---:|
+| Target modules | 336 linears: 48 layers x q/k/v/o/gate/up/down proj | same |
+| Formula | `W'[c,:] = W[c,:] * (1 + o[group(c)])` | `W'x = Wx + scale * B(Ax)` |
+| Trainable params | 2,048 | 27,230,208 |
+| Checkpoint estimate | 4KB | 51.9MB |
+| Param ratio | 1 / 13,296 of LoRA | 1x |
 
-原实现每次 forward 都 materialize `W * gate[:, None]`，会重扫 dense weight，内存带宽浪费很大。现在改成等价的 activation-side scaling：
+## Code Optimizations
+
+1. Map forward uses activation-side scaling instead of materializing `W * gate[:, None]`:
 
 ```python
-out = linear(x, W, None)
+out = F.linear(x, W, None)
 out = out * gate
-out = out + bias
+if bias is not None:
+    out = out + bias
 ```
 
-这个改动后，Map 从慢于 LoRA 变成略快于 LoRA。
+2. GRPO logprob/KL is batched across surviving B*K completions:
 
-## 为什么不会快几十倍
+```python
+logps, kls = batched_logp_and_kl(...)
+loss = (-(adv * logps) + beta_kl * kls).mean()
+loss.backward()
+```
 
-Map 参数量少 13,296x，但训练主要开销不是 adapter 参数，而是完整 9B 模型的：
+3. Active bank and selective rollout:
 
-- rollout generation
-- policy logprob forward/backward
-- KL reference forward
-- eval generation
+- Probe candidate prompts first.
+- Keep only prompts with `1 <= num_correct <= K-1`.
+- Skip groups with zero shaped-reward variance.
+- Reuse active bank with `--active-bank-json`.
 
-Map 和 LoRA 都要跑完整 9B base model，所以不会因为 adapter 参数少就快几十倍。Map 的主要工程优势是：参数、optimizer state、checkpoint 和额外 adapter 计算极小。
+## Experiment Design
 
-## 已做的代码优化
+| Stage | Config |
+|---|---|
+| Dataset | `HuggingFaceH4/MATH-500`, split=test |
+| Eval split | first 200 records |
+| Candidate pool | remaining records, level 3-5 |
+| Active bank | candidate_n=50, probe_K=8, max_new=512, temp=0.8, top_p=0.95 |
+| Selection reward | correct final answer after boxed extraction |
+| Training reward | `correct + 0.1 * format - 0.2 * overlong` |
+| Primary metric | correct reward and greedy eval accuracy |
+| Training | target_updates=30, K=8, max_new=512, beta_kl=0.05 |
+| Eval | eval_n=200, greedy, max_new_eval=512, Wilson CI |
+| Attention | HF sdpa |
 
-1. Map forward 改为 activation-side scaling，避免 materialize scaled weight。
-2. GRPO logprob/KL 从逐 completion 计算改为 batched group 计算。
-3. 支持多个 prompt group 的 B*K batch，但在 G4 + max_new=512 下，大 batch 会 OOM。
-4. 支持 active bank 复用，避免重复 probe。
-5. 支持 zero-variance group skip。
-6. 支持固定时间和收敛阈值参数。
+## Results
 
-## 系统发现
+### Active Bank
 
-- `train_batch=4` 的 Map 在 max_new=512 下 OOM。
-- `train_batch=2` 的 LoRA 在 max_new=512 下 OOM。
-- 完整 30-update / eval200 对比中，两者都使用 `train_batch=1`。
-- G4 是当前最合适 GPU；A100 40GB、L4/T4 显存不足以稳妥跑该配置。
+| metric | value |
+|---|---:|
+| candidate_n | 50 |
+| active_n | 29 |
+| sample_correct_rate | 0.3175 |
+| boxed_rate | 0.9075 |
+| stopped_rate | 0.9400 |
+| long_output_rate | 0.0600 |
+| variance_prompt_rate | 0.5800 |
 
-## Solid 判断
+### Map vs LoRA
 
-当前证据支持：Map 在这个设置下有明显工程优势，并且在一次完整 30-update/eval200 实验中效果也高于 LoRA。
+| metric | Baseline | Map-G2048 | LoRA-r8 | conclusion |
+|---|---:|---:|---:|---|
+| eval accuracy | 0.4050 | 0.4800 | 0.4200 | Map +6pp vs LoRA |
+| correct / n | 81/200 | 96/200 | 84/200 | - |
+| Wilson CI | [0.3394, 0.4742] | [0.4118, 0.5490] | [0.3537, 0.4893] | overlap |
+| updates / skipped | - | 30 / 5 | 30 / 5 | same |
+| train elapsed | - | 1358.7s | 1372.0s | Map slightly faster |
+| mean step | - | 10.04s | 10.42s | Map 0.96x LoRA |
+| tokens/s | - | 278.4 | 247.5 | Map 1.12x LoRA |
+| trainable params | - | 2,048 | 27,230,208 | Map 13,296x fewer |
+| checkpoint | - | 4KB | 51.9MB | Map 13,296x smaller |
+| best train correct mean | - | 0.875 | 1.000 | LoRA peak higher |
+| final train correct mean | - | 0.500 | 0.125 | Map final more stable |
 
-当前证据不支持：Map 已经统计显著地最终收敛优于 LoRA。原因是 Wilson CI 仍重叠，且只有单 seed。
+## Why End-to-End Speed Is Not 13,296x
 
-## 下一步
+Map reduces trainable parameters, optimizer state, checkpoint size, and adapter state communication by 13,296x. It does not remove the shared 9B base model cost: rollout generation, policy forward/backward, KL reference forward, and eval generation. Therefore current HF eager end-to-end throughput gain is 1.12x, not tens of times.
 
-要把结论做扎实，需要：
+## Extreme Performance Plan
 
-1. 多 seed：至少 3 个 seed。
-2. 更大 budget：target_updates 50/100。
-3. Map sweep：G=2048/8192，lr_o=0.003/0.005/0.01。
-4. LoRA sweep：lr=1e-4/3e-4，rank=8。
-5. 固定 wall-clock 对比：例如每个 variant 60 分钟。
+| Layer | Plan | Expected Gain | Algorithm Change |
+|---|---|---|---|
+| Done | activation-side Map + B*K batched logprob/backward | removes obvious overhead | no |
+| Minimal backward | `beta_kl=0` or intermittent KL | removes one 9B no-grad forward per update | mild constraint change |
+| Rollout | vLLM/SGLang generation service | large rollout speedup | no |
+| Batch | search `train_batch` vs `max_new`; 512 needs batch=1 on G4 | better GPU utilization | no |
+| Kernel | fused output-scale or `torch.compile` | small Map-only gain | no |
+| Schedule | fixed active bank + zero-variance skip | fewer wasted updates | no |
 
-## 代码与产物
+## Judgement
 
-- 代码提交：`eb8e5ff` 之后已包含优化和 active-bank harness。
-- 本地报告：`results/9b-math500/FULL_ACTIVE_COMPARE_REPORT.md`
-- 本地 summary：`results/9b-math500/map30-summary.json`、`results/9b-math500/staged-lora-summary.json`
+Current evidence supports: Map has clear engineering advantages and beats LoRA in one 30-update / eval200 run.
+
+Current evidence does not prove: Map is statistically significantly better at final convergence. CI overlaps and only one seed was run.
+
+## Next Training
+
+1. Run at least 3 seeds.
+2. Run update budgets 50 and 100.
+3. Sweep Map: `G={2048,8192}`, `lr_o={0.003,0.005,0.01}`.
+4. Sweep LoRA: `rank=8`, `lr={1e-4,3e-4}`.
+5. Run fixed wall-clock comparison, e.g. 60min per variant.
+6. If wall-clock is the target metric, integrate vLLM/SGLang rollout before hand-writing more Map kernels.
+
+## Code
+
+- `src/adapters.py`: Map/LoRA adapter; Map activation-side scaling.
+- `experiments/math500_active_grpo_9b.py`: active bank, selective rollout, B*K batched logprob/backward, eval.
+- `src/generation_utils.py`: stop token and completion trim.
+- `docs/9b-experiment-plan.md`: full protocol.
