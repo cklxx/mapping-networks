@@ -41,11 +41,11 @@ class DirectMapLinear(nn.Module):
     def forward(self, x):
         o = self.o.to(x.dtype)
         gate = 1.0 + ALPHA_MOD * o[self.gather_idx]  # per-output-channel scale
-        return torch.nn.functional.linear(
-            x,
-            self.base.weight.to(x.dtype) * gate[:, None],
-            None if self.base.bias is None else self.base.bias.to(x.dtype),
-        )
+        out = torch.nn.functional.linear(x, self.base.weight.to(x.dtype), None)
+        out = out * gate
+        if self.base.bias is not None:
+            out = out + self.base.bias.to(x.dtype)
+        return out
 
 
 class LoRALinear(nn.Module):

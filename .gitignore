@@ -19,4 +19,5 @@ env/
 
 # logs / scratch
 *.log
+results/
 .DS_Store
