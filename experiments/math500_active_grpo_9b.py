@@ -657,6 +657,9 @@ def main():
     ap.add_argument("--max-level", type=int, default=5)
     ap.add_argument("--candidate-n", type=int, default=50)
     ap.add_argument("--active-bank-json", default="")
+    ap.add_argument("--require-bank-gate", action="store_true")
+    ap.add_argument("--min-boxed-rate", type=float, default=0.90)
+    ap.add_argument("--max-long-rate", type=float, default=0.10)
     ap.add_argument("--probe-k", type=int, default=8)
     ap.add_argument("--K", type=int, default=8)
     ap.add_argument("--max-new", type=int, default=512)
@@ -726,6 +729,14 @@ def main():
     print("ACTIVE_BANK_SUMMARY " + json.dumps(bank["summary"], separators=(",", ":")), flush=True)
     if not bank["active"]:
         raise RuntimeError("no active prompts found")
+    if args.require_bank_gate:
+        s = bank["summary"]
+        if s["active_n"] < args.target_updates:
+            raise RuntimeError(f"active bank too small: {s['active_n']} < {args.target_updates}")
+        if s["boxed_rate"] < args.min_boxed_rate:
+            raise RuntimeError(f"boxed_rate below gate: {s['boxed_rate']:.4f} < {args.min_boxed_rate:.4f}")
+        if s["long_output_rate"] > args.max_long_rate:
+            raise RuntimeError(f"long_output_rate above gate: {s['long_output_rate']:.4f} > {args.max_long_rate:.4f}")
 
     names = target_modules(model)
     write_json(os.path.join(args.out_dir, "target_modules.json"), {"count": len(names), "names": names})
