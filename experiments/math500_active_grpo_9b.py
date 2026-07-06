@@ -118,6 +118,50 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
     return pids, rows
 
 
+def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extra, stop_ids):
+    prompts = [build_prompt(tok, item["problem"]) for item in items]
+    prev_side = tok.padding_side
+    tok.padding_side = "left"
+    enc = tok(prompts, return_tensors="pt", padding=True).to(dev)
+    tok.padding_side = prev_side
+    with torch.no_grad():
+        gen = model.generate(
+            **enc,
+            do_sample=True,
+            temperature=temperature,
+            top_p=top_p,
+            num_return_sequences=K,
+            max_new_tokens=max_new,
+            **gen_extra,
+        )
+    prompt_width = enc.input_ids.shape[1]
+    groups = []
+    for i, item in enumerate(items):
+        pids = enc.input_ids[i][enc.attention_mask[i].bool()].to(dev)
+        samples = []
+        for k in range(K):
+            row = i * K + k
+            comp_raw = gen[row, prompt_width:]
+            comp, stopped = trim_completion(comp_raw, stop_ids)
+            text = tok.decode(comp, skip_special_tokens=True)
+            pred = extract_answer(text)
+            has_boxed = extract_last_braced(text, "\\boxed{") is not None
+            correct = float(reward_of(text, item["gold"]))
+            overlong = float((not stopped) and comp.numel() >= max_new)
+            samples.append({
+                "comp": comp,
+                "text": text,
+                "pred": pred,
+                "correct": correct,
+                "format": float(has_boxed),
+                "overlong": overlong,
+                "stopped": bool(stopped),
+                "length": int(comp.numel()),
+            })
+        groups.append((item, pids, samples))
+    return groups
+
+
 def comp_logp_and_kl(model, names, prompt_ids, comp_ids, dev):
     ids = torch.cat([prompt_ids, comp_ids], 0)[None].to(dev)
     tgt = ids[0, 1:]
@@ -137,26 +181,31 @@ def comp_logp_and_kl(model, names, prompt_ids, comp_ids, dev):
     return tok_lp.sum(), kl
 
 
-def batched_logp_and_kl(model, names, prompt_ids, comps, pad_id, beta_kl):
-    """One policy forward/backward for the whole GRPO group.
+def batched_logp_and_kl(model, names, prompt_ids_list, comps, pad_id, beta_kl):
+    """One policy forward/backward for all selected GRPO samples.
 
     If beta_kl is zero, skip the base forward entirely. With KL enabled this is
-    the minimum exact path for the current objective: one policy forward plus
-    one no-grad base forward for all K completions.
+    the minimum exact path for the current objective: one policy forward plus one
+    no-grad base forward for all B*K completions that survived zero-variance
+    filtering.
     """
     batch = len(comps)
-    prompt_len = prompt_ids.numel()
+    prompt_lens = [p.numel() for p in prompt_ids_list]
     comp_lens = [c.numel() for c in comps]
-    max_len = prompt_len + max(comp_lens)
-    ids = torch.full((batch, max_len), int(pad_id), device=prompt_ids.device, dtype=prompt_ids.dtype)
-    mask = torch.zeros((batch, max_len - 1), device=prompt_ids.device, dtype=torch.bool)
-    ids[:, :prompt_len] = prompt_ids[None, :]
-    for i, comp in enumerate(comps):
+    max_len = max(p + c for p, c in zip(prompt_lens, comp_lens))
+    dev = prompt_ids_list[0].device
+    dtype = prompt_ids_list[0].dtype
+    ids = torch.full((batch, max_len), int(pad_id), device=dev, dtype=dtype)
+    attn = torch.zeros((batch, max_len), device=dev, dtype=torch.bool)
+    mask = torch.zeros((batch, max_len - 1), device=dev, dtype=torch.bool)
+    for i, (prompt_ids, comp) in enumerate(zip(prompt_ids_list, comps)):
+        prompt_len = prompt_lens[i]
         clen = comp_lens[i]
+        ids[i, :prompt_len] = prompt_ids
         ids[i, prompt_len:prompt_len + clen] = comp
+        attn[i, :prompt_len + clen] = True
         mask[i, prompt_len - 1:prompt_len + clen - 1] = True
 
-    attn = ids.ne(int(pad_id))
     target = ids[:, 1:]
     logits = model(ids, attention_mask=attn).logits[:, :-1, :].float()
     logp = torch.log_softmax(logits, -1)
@@ -164,7 +213,7 @@ def batched_logp_and_kl(model, names, prompt_ids, comps, pad_id, beta_kl):
     sum_lp = (tok_lp * mask).sum(1)
 
     if beta_kl <= 0:
-        return sum_lp, torch.zeros(batch, device=prompt_ids.device)
+        return sum_lp, torch.zeros(batch, device=dev)
 
     with torch.no_grad(), base_forward(model, names):
         base_logits = model(ids, attention_mask=attn).logits[:, :-1, :].float()
@@ -241,6 +290,16 @@ def evaluate(model, tok, items, dev, max_new_eval, eval_batch, gen_extra, stop_i
 
 
 def build_active_bank(model, tok, ds, args, dev, gen_extra, stop_ids):
+    if args.active_bank_json:
+        with open(args.active_bank_json) as f:
+            bank = json.load(f)
+        print(
+            "ACTIVE_BANK_LOADED "
+            + json.dumps(bank.get("summary", {}), separators=(",", ":")),
+            flush=True,
+        )
+        return bank
+
     candidates = select_candidate_records(
         ds, args.n_eval, args.min_level, args.max_level, args.candidate_n
     )
@@ -378,68 +437,92 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         if args.time_budget_s > 0 and time.time() - t_start >= args.time_budget_s:
             print(f"[{key}] time budget hit at attempt={attempt} update={update}", flush=True)
             break
-        item = active[attempt % len(active)]
         t0 = time.time()
-        pids, samples = sample_one(
-            model, tok, item["problem"], item["gold"], dev, args.K, args.max_new,
+        batch_items = [
+            active[(attempt * args.train_batch + i) % len(active)]
+            for i in range(args.train_batch)
+        ]
+        groups = sample_many(
+            model, tok, batch_items, dev, args.K, args.max_new,
             args.temperature, args.top_p, gen_extra, stop_ids,
         )
-        corrects = [s["correct"] for s in samples]
-        shaped = shaped_rewards(samples, args.format_weight, args.overlong_penalty)
-        correct_var = max(corrects) != min(corrects)
-        shaped_var = max(shaped) != min(shaped)
-        event_base = {
-            "variant": key,
-            "attempt": attempt,
-            "bank_id": item["bank_id"],
-            "dataset_idx": item["dataset_idx"],
-            "level": item["level"],
-            "gold": item["gold"],
-            "correct_rewards": corrects,
-            "shaped_rewards": shaped,
-            "format_rewards": [s["format"] for s in samples],
-            "overlong": [s["overlong"] for s in samples],
-            "lengths": [s["length"] for s in samples],
-            "preds": [s["pred"] for s in samples],
-            "correct_var": bool(correct_var),
-            "shaped_var": bool(shaped_var),
-        }
-        if not shaped_var:
-            skipped.append(dict(event_base, event="skipped_zero_variance"))
-            append_jsonl(os.path.join(result_root, "progress.jsonl"), skipped[-1])
-            print(
-                f"[{key}] skip attempt={attempt} bank_id={item['bank_id']} "
-                f"correct={sum(corrects):.0f}/{args.K} shaped_var={shaped_var}",
-                flush=True,
-            )
+
+        selected = []
+        selected_adv = []
+        group_events = []
+        for item, pids, samples in groups:
+            corrects = [s["correct"] for s in samples]
+            shaped = shaped_rewards(samples, args.format_weight, args.overlong_penalty)
+            correct_var = max(corrects) != min(corrects)
+            shaped_var = max(shaped) != min(shaped)
+            event_base = {
+                "variant": key,
+                "attempt": attempt,
+                "bank_id": item["bank_id"],
+                "dataset_idx": item["dataset_idx"],
+                "level": item["level"],
+                "gold": item["gold"],
+                "correct_rewards": corrects,
+                "shaped_rewards": shaped,
+                "format_rewards": [s["format"] for s in samples],
+                "overlong": [s["overlong"] for s in samples],
+                "lengths": [s["length"] for s in samples],
+                "preds": [s["pred"] for s in samples],
+                "correct_var": bool(correct_var),
+                "shaped_var": bool(shaped_var),
+            }
+            if not shaped_var:
+                skipped.append(dict(event_base, event="skipped_zero_variance"))
+                append_jsonl(os.path.join(result_root, "progress.jsonl"), skipped[-1])
+                continue
+            rs = torch.tensor(shaped, dtype=torch.float32)
+            adv = (rs - rs.mean()) / (rs.std() + 1e-4)
+            for sample, adv_i in zip(samples, adv):
+                selected.append((pids, sample))
+                selected_adv.append(adv_i)
+            group_events.append(dict(
+                event_base,
+                correct_mean=sum(corrects) / len(corrects),
+                shaped_mean=sum(shaped) / len(shaped),
+            ))
+
+        if not selected:
+            print(f"[{key}] skip attempt={attempt} groups={len(groups)} all_zero_variance", flush=True)
             continue
 
-        rs = torch.tensor(shaped, dtype=torch.float32)
-        adv = (rs - rs.mean()) / (rs.std() + 1e-4)
         opt.zero_grad(set_to_none=True)
-        comps = [sample["comp"] for sample in samples]
+        prompt_batch = [pids for pids, _ in selected]
+        comps = [sample["comp"] for _, sample in selected]
         logps, kls = batched_logp_and_kl(
             model,
             names,
-            pids,
+            prompt_batch,
             comps,
             args.gen_extra["pad_token_id"],
             args.beta_kl,
         )
-        tokens = sum(pids.numel() + comp.numel() for comp in comps)
-        loss = (-(adv.to(dev).detach() * logps) + args.beta_kl * kls).mean()
+        tokens = sum(pids.numel() + comp.numel() for pids, comp in zip(prompt_batch, comps))
+        adv_tensor = torch.stack(selected_adv).to(dev).detach()
+        loss = (-(adv_tensor * logps) + args.beta_kl * kls).mean()
         loss.backward()
         opt.step()
         if kind == "map":
             with torch.no_grad():
                 params[0].clamp_(-args.o_clamp, args.o_clamp)
         kl_mean = float(kls.detach().mean().item())
+        correct_mean = sum(e["correct_mean"] for e in group_events) / len(group_events)
+        shaped_mean = sum(e["shaped_mean"] for e in group_events) / len(group_events)
         e = dict(
-            event_base,
             event="update",
+            variant=key,
+            attempt=attempt,
             update=update,
-            correct_mean=sum(corrects) / len(corrects),
-            shaped_mean=sum(shaped) / len(shaped),
+            groups=len(groups),
+            active_groups=len(group_events),
+            skipped_groups=len(groups) - len(group_events),
+            group_events=group_events,
+            correct_mean=correct_mean,
+            shaped_mean=shaped_mean,
             kl=kl_mean,
             step_s=time.time() - t0,
             elapsed_s=time.time() - t_start,
@@ -449,9 +532,8 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         events.append(e)
         append_jsonl(os.path.join(result_root, "progress.jsonl"), e)
         print(
-            f"[{key}] update={update} attempt={attempt} bank_id={item['bank_id']} "
-            f"correct={sum(corrects):.0f}/{args.K} shaped={e['shaped_mean']:.3f} "
-            f"kl={kl_mean:.4f}",
+            f"[{key}] update={update} attempt={attempt} groups={len(group_events)}/{len(groups)} "
+            f"correct={correct_mean:.3f} shaped={shaped_mean:.3f} kl={kl_mean:.4f}",
             flush=True,
         )
         update += 1
@@ -574,6 +656,7 @@ def main():
     ap.add_argument("--min-level", type=int, default=3)
     ap.add_argument("--max-level", type=int, default=5)
     ap.add_argument("--candidate-n", type=int, default=50)
+    ap.add_argument("--active-bank-json", default="")
     ap.add_argument("--probe-k", type=int, default=8)
     ap.add_argument("--K", type=int, default=8)
     ap.add_argument("--max-new", type=int, default=512)
@@ -585,6 +668,7 @@ def main():
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--target-updates", type=int, default=20)
     ap.add_argument("--max-attempts", type=int, default=60)
+    ap.add_argument("--train-batch", type=int, default=1)
     ap.add_argument("--time-budget-s", type=float, default=0.0)
     ap.add_argument("--convergence-correct", type=float, default=0.0)
     ap.add_argument("--format-weight", type=float, default=0.1)
@@ -673,6 +757,7 @@ def main():
             "eval_n": len(args.eval_items),
             "target_updates": args.target_updates,
             "max_attempts": args.max_attempts,
+            "train_batch": args.train_batch,
             "time_budget_s": args.time_budget_s,
             "convergence_correct": args.convergence_correct,
             "format_weight": args.format_weight,
