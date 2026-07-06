@@ -137,6 +137,44 @@ def comp_logp_and_kl(model, names, prompt_ids, comp_ids, dev):
     return tok_lp.sum(), kl
 
 
+def batched_logp_and_kl(model, names, prompt_ids, comps, pad_id, beta_kl):
+    """One policy forward/backward for the whole GRPO group.
+
+    If beta_kl is zero, skip the base forward entirely. With KL enabled this is
+    the minimum exact path for the current objective: one policy forward plus
+    one no-grad base forward for all K completions.
+    """
+    batch = len(comps)
+    prompt_len = prompt_ids.numel()
+    comp_lens = [c.numel() for c in comps]
+    max_len = prompt_len + max(comp_lens)
+    ids = torch.full((batch, max_len), int(pad_id), device=prompt_ids.device, dtype=prompt_ids.dtype)
+    mask = torch.zeros((batch, max_len - 1), device=prompt_ids.device, dtype=torch.bool)
+    ids[:, :prompt_len] = prompt_ids[None, :]
+    for i, comp in enumerate(comps):
+        clen = comp_lens[i]
+        ids[i, prompt_len:prompt_len + clen] = comp
+        mask[i, prompt_len - 1:prompt_len + clen - 1] = True
+
+    attn = ids.ne(int(pad_id))
+    target = ids[:, 1:]
+    logits = model(ids, attention_mask=attn).logits[:, :-1, :].float()
+    logp = torch.log_softmax(logits, -1)
+    tok_lp = logp.gather(2, target[:, :, None]).squeeze(2)
+    sum_lp = (tok_lp * mask).sum(1)
+
+    if beta_kl <= 0:
+        return sum_lp, torch.zeros(batch, device=prompt_ids.device)
+
+    with torch.no_grad(), base_forward(model, names):
+        base_logits = model(ids, attention_mask=attn).logits[:, :-1, :].float()
+        base_logp = torch.log_softmax(base_logits, -1)
+    token_kl = (logp.exp() * (logp - base_logp)).sum(-1)
+    denom = mask.sum(1).clamp_min(1)
+    kl = (token_kl * mask).sum(1) / denom
+    return sum_lp, kl
+
+
 def wilson_ci(k, n, z=1.96):
     if n == 0:
         return (0.0, 0.0)
@@ -379,18 +417,23 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         rs = torch.tensor(shaped, dtype=torch.float32)
         adv = (rs - rs.mean()) / (rs.std() + 1e-4)
         opt.zero_grad(set_to_none=True)
-        kl_acc, tokens = [], 0
-        for k, sample in enumerate(samples):
-            tokens += pids.numel() + sample["comp"].numel()
-            lp, kl = comp_logp_and_kl(model, names, pids, sample["comp"], dev)
-            kl_acc.append(float(kl.item()))
-            loss = -adv[k].to(dev).detach() * lp + args.beta_kl * kl
-            (loss / args.K).backward()
+        comps = [sample["comp"] for sample in samples]
+        logps, kls = batched_logp_and_kl(
+            model,
+            names,
+            pids,
+            comps,
+            args.gen_extra["pad_token_id"],
+            args.beta_kl,
+        )
+        tokens = sum(pids.numel() + comp.numel() for comp in comps)
+        loss = (-(adv.to(dev).detach() * logps) + args.beta_kl * kls).mean()
+        loss.backward()
         opt.step()
         if kind == "map":
             with torch.no_grad():
                 params[0].clamp_(-args.o_clamp, args.o_clamp)
-        kl_mean = sum(kl_acc) / max(1, len(kl_acc))
+        kl_mean = float(kls.detach().mean().item())
         e = dict(
             event_base,
             event="update",
