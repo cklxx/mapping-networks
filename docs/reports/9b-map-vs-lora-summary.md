@@ -66,3 +66,14 @@ loss.backward()
 3. Map sweep: G=2048/8192, lr_o=0.003/0.005/0.01。
 4. LoRA sweep: lr=1e-4/3e-4。
 5. 若要 wall-clock 极致，接入 vLLM/SGLang rollout；继续手写 Map scale kernel 收益有限。
+
+## 性能 Sweep
+
+| 配置 | tokens/s | mean step | peak VRAM | 备注 |
+|---|---:|---:|---:|---|
+| max_new=512, train_batch=2, beta_kl=0.05 | 438.4 | 7.93s | 80.6GB | 最高吞吐，接近显存上限 |
+| max_new=512, train_batch=1, beta_kl=0 | 379.3 | 5.92s | 46.5GB | 低显存稳定配置 |
+| max_new=256, train_batch=2, beta_kl=0.05 | 437.5 | 7.90s | 80.1GB | 短输出下也接近最高吞吐 |
+| max_new=512, train_batch=1, beta_kl=0.05 | 327.7 | 7.03s | 50.9GB | 带 KL 的稳健单 batch |
+
+结论：如果追求最高吞吐，优先用 train_batch=2；如果追求稳定和可扩展，优先用 beta_kl=0、train_batch=1。真正的数量级加速需要把 rollout 切到 vLLM/SGLang。
