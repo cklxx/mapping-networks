@@ -96,3 +96,14 @@ Qwen3.5-9B 未进入 Map/LoRA 训练。最佳配置仍未满足 active_n、boxed
 | Trainable params | - | 2,048 | 16,121,856 | 16,121,856 |
 
 Qwen3.5-9B 使用 level1-3 active bank 后完成训练。Map 高于 baseline 4pp，高于最佳 LoRA 9pp；但仍是单 seed，CI 有重叠。
+
+## Loop0 极致性能结果
+
+| 配置 | tokens/s | step_s | peak VRAM | 结论 |
+|---|---:|---:|---:|---|
+| all layers, all targets, beta_kl=0 | 343.3 | 6.97s | 45.45GB | baseline local Map |
+| all layers, o_down, beta_kl=0 | 468.5 | 4.25s | 35.37GB | 快 36.5% |
+| all layers, down only, beta_kl=0.05 | 470.1 | 4.37s | 35.84GB | 最快且低显存 |
+| last 8 layers, o_down, beta_kl=0.05 | 435.8 | 4.53s | 36.68GB | 局部层有效但不最优 |
+
+Loop0 结论：局部 target 能把 Map 从 343 tok/s 提到 470 tok/s，显存从 45.5GB 降到 35.8GB，但未达到 3x。下一步进入 Loop1：SGLang/vLLM rollout 加速。
