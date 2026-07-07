@@ -80,3 +80,19 @@ Qwen3.5-9B 未进入 Map/LoRA 训练。最佳配置仍未满足 active_n、boxed
 | XML answer tag, max_new=256 | 6 / 50 | 0.053 | 0.945 | 未过 gate |
 
 已修复 scorer：支持 `<answer>...</answer>` 和 degree 归一化。修复后 Qwen3.5 仍未满足 active bank、boxed_rate、long_output_rate gate，因此没有进入 Map/LoRA 完整训练。
+
+## Qwen3.5-9B 完整实验结果
+
+| 指标 | Baseline | Map-G2048 | LoRA-r8 1e-4 | LoRA-r8 3e-4 |
+|---|---:|---:|---:|---:|
+| Eval accuracy | 0.355 | 0.395 | 0.305 | 0.150 |
+| Correct / n | 71 / 200 | 79 / 200 | 61 / 200 | 30 / 200 |
+| Wilson CI | [0.292, 0.423] | [0.330, 0.464] | [0.245, 0.372] | [0.107, 0.206] |
+| Updates / skipped | - | 30 / 11 | 26 / 94 | 30 / 30 |
+| Train elapsed | - | 84.2s | 111.3s | 89.4s |
+| Mean step | - | 0.970s | 1.088s | 0.970s |
+| Tokens/s | - | 950.0 | 839.5 | 847.9 |
+| Peak VRAM | - | 73.2GB | 71.4GB | 71.4GB |
+| Trainable params | - | 2,048 | 16,121,856 | 16,121,856 |
+
+Qwen3.5-9B 使用 level1-3 active bank 后完成训练。Map 高于 baseline 4pp，高于最佳 LoRA 9pp；但仍是单 seed，CI 有重叠。
