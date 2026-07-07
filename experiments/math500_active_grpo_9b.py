@@ -126,6 +126,7 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
         overlong = float((not stopped) and comp.numel() >= max_new)
         rows.append({
             "comp": comp,
+            "comp_ids": [int(x) for x in comp.detach().cpu().tolist()],
             "text": text,
             "pred": pred,
             "correct": correct,
@@ -173,12 +174,13 @@ def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extr
             comp, stopped = trim_completion(comp_raw, stop_ids)
             text = tok.decode(comp, skip_special_tokens=True)
             pred = extract_answer(text)
-        has_boxed = extract_last_braced(text, "\\boxed{") is not None
-        has_answer_tag = "<answer>" in text.lower() and "</answer>" in text.lower()
-        correct = float(reward_of(text, item["gold"]))
-        overlong = float((not stopped) and comp.numel() >= max_new)
-        samples.append({
+            has_boxed = extract_last_braced(text, "\\boxed{") is not None
+            has_answer_tag = "<answer>" in text.lower() and "</answer>" in text.lower()
+            correct = float(reward_of(text, item["gold"]))
+            overlong = float((not stopped) and comp.numel() >= max_new)
+            samples.append({
                 "comp": comp,
+                "comp_ids": [int(x) for x in comp.detach().cpu().tolist()],
                 "text": text,
                 "pred": pred,
                 "correct": correct,
@@ -379,6 +381,19 @@ def build_active_bank(model, tok, ds, args, dev, gen_extra, stop_ids):
             "stopped": stopped,
             "preds": preds,
             "lengths": lengths,
+            "samples": [
+                {
+                    "comp_ids": s["comp_ids"],
+                    "text": s["text"],
+                    "pred": s["pred"],
+                    "correct": s["correct"],
+                    "format": s["format"],
+                    "overlong": s["overlong"],
+                    "stopped": s["stopped"],
+                    "length": s["length"],
+                }
+                for s in samples
+            ],
             "has_correct_variance": bool(has_variance),
         }
         all_rows.append(bank_row)
