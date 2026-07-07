@@ -107,3 +107,22 @@ Qwen3.5-9B 使用 level1-3 active bank 后完成训练。Map 高于 baseline 4pp
 | last 8 layers, o_down, beta_kl=0.05 | 435.8 | 4.53s | 36.68GB | 局部层有效但不最优 |
 
 Loop0 结论：局部 target 能把 Map 从 343 tok/s 提到 470 tok/s，显存从 45.5GB 降到 35.8GB，但未达到 3x。下一步进入 Loop1：SGLang/vLLM rollout 加速。
+
+## Qwen3.5-9B 3-Seed 结果
+
+| seed | Baseline | Map-G2048 | LoRA-r8 1e-4 | Map - LoRA |
+|---|---:|---:|---:|---:|
+| 0 | 0.355 | 0.385 | 0.265 | +0.120 |
+| 1 | 0.355 | 0.375 | 0.350 | +0.025 |
+| 2 | 0.355 | 0.390 | 0.365 | +0.025 |
+| mean | 0.355 | 0.383 | 0.327 | +0.057 |
+| stdev | 0.000 | 0.008 | 0.054 | - |
+
+| 性能指标 | Map-G2048 | LoRA-r8 1e-4 |
+|---|---:|---:|
+| tokens/s mean | 916.9 | 869.2 |
+| tokens/s stdev | 30.3 | 67.6 |
+| peak VRAM mean | 77.1GB | 71.4GB |
+| trainable params | 2,048 | 16,121,856 |
+
+3-seed 结论：Map 平均 accuracy 0.383，高于 LoRA 0.327；Map 平均吞吐 916.9 tokens/s，高于 LoRA 869.2 tokens/s；Map 参数量少 7,872x。
