@@ -403,6 +403,9 @@ def save_curve(root, key, events):
 
 
 def train_variant(model, tok, names, active, args, dev, kind, result_root):
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     if kind == "map":
         key = "Map-G2048"
         originals = [getattr(*get_parent(model, n)) for n in names]
@@ -585,6 +588,11 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         "final_shaped_mean": events[-1]["shaped_mean"] if events else 0.0,
         "mean_step_s": total_s / max(1, len(events)),
         "tokens_per_s": total_tokens / max(1e-9, total_s),
+        "peak_alloc_gb": (
+            torch.cuda.max_memory_allocated() / 1024**3
+            if torch.cuda.is_available()
+            else 0.0
+        ),
         "eval": eval_result,
         "events": events,
         "skipped_events": skipped,
@@ -795,6 +803,7 @@ def main():
                 "checkpoint_bytes_est": v["checkpoint_bytes_est"],
                 "mean_step_s": v["mean_step_s"],
                 "tokens_per_s": v["tokens_per_s"],
+                "peak_alloc_gb": v["peak_alloc_gb"],
                 "eval": v["eval"],
                 "best_correct_mean": v["best_correct_mean"],
                 "final_correct_mean": v["final_correct_mean"],
