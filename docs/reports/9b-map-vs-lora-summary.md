@@ -45,3 +45,14 @@
 | max_new=256, train_batch=2, beta_kl=0.05 | 437.5 | 7.90s | 80.1GB | 短输出高吞吐 |
 
 最终推荐：稳定完整实验用 Map-G2048, train_batch=1, max_new=512, beta_kl=0.05；追求短跑吞吐可用 train_batch=2，但需接受 OOM 风险。
+
+## Qwen3.5-9B 结果
+
+| Prompt 配置 | active_n | boxed_rate | long_output_rate | 结论 |
+|---|---:|---:|---:|---|
+| enable_thinking=false + /no_think, max_new=256 | 2 / 30 | 0.079 | 0.921 | 未过 gate |
+| enable_thinking=false + /no_think, max_new=512 | 8 / 30 | 0.392 | 0.613 | 未过 gate |
+| enable_thinking=false, max_new=256 | 2 / 30 | 0.050 | 0.950 | 未过 gate |
+| /no_think only, max_new=256 | 0 / 30 | 0.083 | 1.000 | 未过 gate |
+
+Qwen3.5-9B 当前未进入 Map/LoRA 训练。原因：active bank、boxed_rate、long_output_rate 均不满足训练前置条件。
