@@ -68,10 +68,10 @@ def append_jsonl(path, obj):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def build_prompt(tok, q, prompt_suffix="", chat_template_kwargs=None):
+def build_prompt(tok, q, prompt_suffix="", chat_template_kwargs=None, system_prompt=None):
     if prompt_suffix:
         q = q.rstrip() + "\n" + prompt_suffix
-    msgs = [{"role": "system", "content": SYS}, {"role": "user", "content": q}]
+    msgs = [{"role": "system", "content": system_prompt or SYS}, {"role": "user", "content": q}]
     if getattr(tok, "chat_template", None):
         kwargs = dict(chat_template_kwargs or {})
         return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **kwargs)
@@ -96,7 +96,13 @@ def select_candidate_records(ds, n_eval, min_level, max_level, candidate_n):
 
 
 def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_extra, stop_ids):
-    prompt = build_prompt(tok, q, getattr(tok, "_mn_prompt_suffix", ""), getattr(tok, "_mn_chat_template_kwargs", None))
+    prompt = build_prompt(
+        tok,
+        q,
+        getattr(tok, "_mn_prompt_suffix", ""),
+        getattr(tok, "_mn_chat_template_kwargs", None),
+        getattr(tok, "_mn_system_prompt", None),
+    )
     pids = tok(prompt, return_tensors="pt").input_ids[0].to(dev)
     with torch.no_grad():
         gen = model.generate(
@@ -132,7 +138,13 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
 
 def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extra, stop_ids):
     prompts = [
-        build_prompt(tok, item["problem"], getattr(tok, "_mn_prompt_suffix", ""), getattr(tok, "_mn_chat_template_kwargs", None))
+            build_prompt(
+                tok,
+                item["problem"],
+                getattr(tok, "_mn_prompt_suffix", ""),
+                getattr(tok, "_mn_chat_template_kwargs", None),
+                getattr(tok, "_mn_system_prompt", None),
+            )
         for item in items
     ]
     prev_side = tok.padding_side
@@ -260,7 +272,13 @@ def evaluate(model, tok, items, dev, max_new_eval, eval_batch, gen_extra, stop_i
     for b0 in range(0, len(items), eval_batch):
         batch = items[b0:b0 + eval_batch]
         prompts = [
-            build_prompt(tok, q, getattr(tok, "_mn_prompt_suffix", ""), getattr(tok, "_mn_chat_template_kwargs", None))
+            build_prompt(
+                tok,
+                q,
+                getattr(tok, "_mn_prompt_suffix", ""),
+                getattr(tok, "_mn_chat_template_kwargs", None),
+                getattr(tok, "_mn_system_prompt", None),
+            )
             for q, _ in batch
         ]
         enc = tok(prompts, return_tensors="pt", padding=True).to(dev)
@@ -625,7 +643,13 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
 def adapter_sanity(model, tok, names, active, dev, result_root, lora_r):
     q = active[0]["problem"]
     ids = tok(
-        build_prompt(tok, q, getattr(tok, "_mn_prompt_suffix", ""), getattr(tok, "_mn_chat_template_kwargs", None)),
+        build_prompt(
+            tok,
+            q,
+            getattr(tok, "_mn_prompt_suffix", ""),
+            getattr(tok, "_mn_chat_template_kwargs", None),
+            getattr(tok, "_mn_system_prompt", None),
+        ),
         return_tensors="pt",
     ).input_ids.to(dev)
 
@@ -714,6 +738,7 @@ def main():
     ap.add_argument("--lora-lr", type=float, default=1e-4)
     ap.add_argument("--variants", default="map,lora")
     ap.add_argument("--attn-impl", default="")
+    ap.add_argument("--system-prompt", default="")
     ap.add_argument("--prompt-suffix", default="")
     ap.add_argument("--chat-template-kwargs", default="")
     args = ap.parse_args()
@@ -733,6 +758,7 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
+    tok._mn_system_prompt = args.system_prompt or None
     tok._mn_prompt_suffix = args.prompt_suffix
     tok._mn_chat_template_kwargs = parse_json_obj(args.chat_template_kwargs)
     gen_extra = generation_kwargs(tok)

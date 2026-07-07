@@ -56,3 +56,16 @@
 | /no_think only, max_new=256 | 0 / 30 | 0.083 | 1.000 | 未过 gate |
 
 Qwen3.5-9B 当前未进入 Map/LoRA 训练。原因：active bank、boxed_rate、long_output_rate 均不满足训练前置条件。
+
+## Qwen3.5-9B Gate 结果
+
+| Prompt 配置 | active_n | boxed_rate | long_output_rate | variance_prompt_rate | 结论 |
+|---|---:|---:|---:|---:|---|
+| answer_only + no_think, max_new=64 | 8 / 30 | 0.721 | 0.283 | 0.267 | 未过 gate |
+| answer_only + no_think, max_new=128 | 8 / 30 | 0.746 | 0.258 | 0.267 | 未过 gate |
+| answer_only + no_think, max_new=256 | 6 / 30 | 0.750 | 0.250 | 0.200 | 未过 gate |
+| brief + no_think, max_new=64 | 0 / 30 | 0.008 | 0.992 | 0.000 | 未过 gate |
+| brief + no_think, max_new=128 | 0 / 30 | 0.000 | 1.000 | 0.000 | 未过 gate |
+| brief + no_think, max_new=256 | 3 / 30 | 0.146 | 0.854 | 0.100 | 未过 gate |
+
+Qwen3.5-9B 未进入 Map/LoRA 训练。最佳配置仍未满足 active_n、boxed_rate、long_output_rate 三个 gate。
