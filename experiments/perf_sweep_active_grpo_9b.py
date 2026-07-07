@@ -177,6 +177,8 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16")
     ap.add_argument("--attn-impl", default="sdpa")
+    ap.add_argument("--last-n-layers-list", default="0,8,16")
+    ap.add_argument("--target-subset-list", default="all,o_down,down")
     ap.add_argument("--candidate-n", type=int, default=30)
     ap.add_argument("--probe-k", type=int, default=8)
     ap.add_argument("--K", type=int, default=8)
@@ -232,21 +234,35 @@ def main():
     if len(bank["active"]) < 4:
         raise RuntimeError(f"not enough active prompts: {len(bank['active'])}")
 
-    names = target_modules(model)
+    all_names_cache = {}
     configs = []
     for max_new in parse_list(args.max_new_list, int):
         for train_batch in parse_list(args.train_batch_list, int):
             for beta_kl in parse_list(args.beta_kl_list, float):
-                configs.append({
-                    "name": f"new{max_new}_b{train_batch}_kl{beta_kl:g}",
-                    "max_new": max_new,
-                    "train_batch": train_batch,
-                    "beta_kl": beta_kl,
-                    "updates": args.updates,
-                    "max_attempts": args.max_attempts,
-                    "lr_o": args.lr_o,
-                })
-    results = [run_map_config(model, tok, names, bank["active"], args, cfg, dev) for cfg in configs]
+                for last_n in parse_list(args.last_n_layers_list, int):
+                    for subset in parse_list(args.target_subset_list, str):
+                        configs.append({
+                            "name": f"new{max_new}_b{train_batch}_kl{beta_kl:g}_last{last_n}_{subset}",
+                            "max_new": max_new,
+                            "train_batch": train_batch,
+                            "beta_kl": beta_kl,
+                            "last_n_layers": last_n,
+                            "target_subset": subset,
+                            "updates": args.updates,
+                            "max_attempts": args.max_attempts,
+                            "lr_o": args.lr_o,
+                        })
+    results = []
+    for cfg in configs:
+        key = (cfg["last_n_layers"], cfg["target_subset"])
+        if key not in all_names_cache:
+            last_n = None if cfg["last_n_layers"] <= 0 else cfg["last_n_layers"]
+            all_names_cache[key] = target_modules(model, last_n_layers=last_n, subset=cfg["target_subset"])
+        names = all_names_cache[key]
+        if not names:
+            results.append({**cfg, "ok": False, "error": "no_target_modules"})
+            continue
+        results.append(run_map_config(model, tok, names, bank["active"], args, cfg, dev))
     payload = {"bank_summary": bank["summary"], "results": results}
     A.write_json(args.out, payload)
     print("PERF_SWEEP_JSON " + json.dumps({

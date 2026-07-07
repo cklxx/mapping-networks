@@ -755,6 +755,8 @@ def main():
     ap.add_argument("--lora-lr", type=float, default=1e-4)
     ap.add_argument("--variants", default="map,lora")
     ap.add_argument("--attn-impl", default="")
+    ap.add_argument("--last-n-layers", type=int, default=0)
+    ap.add_argument("--target-subset", default="all", choices=["all", "attn", "mlp", "o", "down", "o_down"])
     ap.add_argument("--system-prompt", default="")
     ap.add_argument("--prompt-suffix", default="")
     ap.add_argument("--chat-template-kwargs", default="")
@@ -816,7 +818,8 @@ def main():
         if s["long_output_rate"] > args.max_long_rate:
             raise RuntimeError(f"long_output_rate above gate: {s['long_output_rate']:.4f} > {args.max_long_rate:.4f}")
 
-    names = target_modules(model)
+    last_n_layers = None if args.last_n_layers <= 0 else args.last_n_layers
+    names = target_modules(model, last_n_layers=last_n_layers, subset=args.target_subset)
     write_json(os.path.join(args.out_dir, "target_modules.json"), {"count": len(names), "names": names})
     if not names:
         raise RuntimeError("no target modules found")

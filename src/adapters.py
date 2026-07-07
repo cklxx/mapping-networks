@@ -89,9 +89,20 @@ def num_layers_of(model) -> int:
     return mx + 1
 
 
-def target_modules(model, last_n_layers: int | None = None) -> list[str]:
+def target_modules(model, last_n_layers: int | None = None, subset: str = "all") -> list[str]:
     """Names of every decoder `*_proj` linear. `last_n_layers` restricts to the top
     block (None = all layers)."""
+    allowed = {
+        "all": None,
+        "attn": ("q_proj", "k_proj", "v_proj", "o_proj", "out_proj"),
+        "mlp": ("gate_proj", "up_proj", "down_proj"),
+        "o": ("o_proj", "out_proj"),
+        "down": ("down_proj",),
+        "o_down": ("o_proj", "out_proj", "down_proj"),
+    }
+    if subset not in allowed:
+        raise ValueError(f"unknown target subset: {subset}")
+    suffixes = allowed[subset]
     nlayers = num_layers_of(model)
     floor = 0 if last_n_layers is None else max(0, nlayers - last_n_layers)
     out = []
@@ -101,7 +112,8 @@ def target_modules(model, last_n_layers: int | None = None) -> list[str]:
         m = re.search(r"\.layers\.(\d+)\.", name)
         if not m or int(m.group(1)) < floor:
             continue
-        if name.endswith("_proj"):
+        leaf = name.rsplit(".", 1)[-1]
+        if name.endswith("_proj") and (suffixes is None or leaf in suffixes):
             out.append(name)
     return out
 
