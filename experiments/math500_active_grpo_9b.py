@@ -720,6 +720,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="01-ai/Yi-1.5-9B-Chat")
     ap.add_argument("--out-dir", default="results/9b-math500/active-grpo-gate")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16")
     ap.add_argument("--n-eval", type=int, default=200)
@@ -762,7 +763,7 @@ def main():
     ap.add_argument("--chat-template-kwargs", default="")
     args = ap.parse_args()
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     os.makedirs(args.out_dir, exist_ok=True)
     dev = args.device
     dt = torch.bfloat16 if args.dtype == "bf16" else torch.float16
