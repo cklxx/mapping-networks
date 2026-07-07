@@ -121,6 +121,7 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
         text = tok.decode(comp, skip_special_tokens=True)
         pred = extract_answer(text)
         has_boxed = extract_last_braced(text, "\\boxed{") is not None
+        has_answer_tag = "<answer>" in text.lower() and "</answer>" in text.lower()
         correct = float(reward_of(text, gold))
         overlong = float((not stopped) and comp.numel() >= max_new)
         rows.append({
@@ -128,7 +129,7 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
             "text": text,
             "pred": pred,
             "correct": correct,
-            "format": float(has_boxed),
+            "format": float(has_boxed or has_answer_tag),
             "overlong": overlong,
             "stopped": bool(stopped),
             "length": int(comp.numel()),
@@ -172,15 +173,16 @@ def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extr
             comp, stopped = trim_completion(comp_raw, stop_ids)
             text = tok.decode(comp, skip_special_tokens=True)
             pred = extract_answer(text)
-            has_boxed = extract_last_braced(text, "\\boxed{") is not None
-            correct = float(reward_of(text, item["gold"]))
-            overlong = float((not stopped) and comp.numel() >= max_new)
-            samples.append({
+        has_boxed = extract_last_braced(text, "\\boxed{") is not None
+        has_answer_tag = "<answer>" in text.lower() and "</answer>" in text.lower()
+        correct = float(reward_of(text, item["gold"]))
+        overlong = float((not stopped) and comp.numel() >= max_new)
+        samples.append({
                 "comp": comp,
                 "text": text,
                 "pred": pred,
                 "correct": correct,
-                "format": float(has_boxed),
+                "format": float(has_boxed or has_answer_tag),
                 "overlong": overlong,
                 "stopped": bool(stopped),
                 "length": int(comp.numel()),

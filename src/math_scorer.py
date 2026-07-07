@@ -62,6 +62,7 @@ def normalize_answer(answer: str) -> str:
     s = re.sub(r"\\text\{([^{}]*)\}", r"\1", s)
     s = s.replace(",", "")
     s = re.sub(r"\s+", "", s)
+    s = s.replace("^\\circ", "").replace("\\circ", "").replace("°", "")
     s = s.rstrip(".")
     return s.lower()
 
@@ -81,6 +82,9 @@ def extract_answer(text: str):
     boxed = extract_last_braced(text, "\\boxed{")
     if boxed:
         return normalize_answer(boxed)
+    answer_tags = re.findall(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.IGNORECASE | re.DOTALL)
+    if answer_tags:
+        return normalize_answer(answer_tags[-1])
     m = re.search(r"####\s*(.+)", text)
     if m:
         return normalize_answer(m.group(1).splitlines()[0])

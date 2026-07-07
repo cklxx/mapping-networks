@@ -147,16 +147,17 @@ def main():
                 text = tok.decode(comp, skip_special_tokens=True)
                 pred = extract_answer(text)
                 has_boxed = extract_last_braced(text, "\\boxed{") is not None
+                has_answer_tag = "<answer>" in text.lower() and "</answer>" in text.lower()
                 rew = reward_of(text, gold)
                 rewards.append(float(rew))
                 preds.append(pred)
-                boxed_flags.append(bool(has_boxed))
+                boxed_flags.append(bool(has_boxed or has_answer_tag))
                 stopped_flags.append(bool(stopped))
                 lengths.append(int(comp.numel()))
                 total += 1
                 correct += int(rew > 0)
                 extracted += int(pred is not None and pred != "")
-                boxed += int(has_boxed)
+                boxed += int(has_boxed or has_answer_tag)
                 stopped_outputs += int(stopped)
                 long_outputs += int((not stopped) and comp.numel() >= max_new)
                 if len(decoded_cases) < args.sample_cases:
@@ -166,6 +167,7 @@ def main():
                         "completion": text[:1500],
                         "pred": pred,
                         "has_boxed": bool(has_boxed),
+                        "has_answer_tag": bool(has_answer_tag),
                         "stopped": bool(stopped),
                         "reward": float(rew),
                         "length": int(comp.numel()),
