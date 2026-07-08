@@ -91,6 +91,15 @@ def main():
     ap.add_argument("--out-root", default="results/9b-math500/qwen35-active-grpo-20260707")
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--eval-baseline-seed", type=int, default=0)
+    ap.add_argument("--target-updates", default="30")
+    ap.add_argument("--max-attempts", default="120")
+    ap.add_argument("--candidate-n", default="50")
+    ap.add_argument("--probe-k", default="8")
+    ap.add_argument("--max-new", default="64")
+    ap.add_argument("--max-new-eval", default="128")
+    ap.add_argument("--eval-n", default="200")
+    ap.add_argument("--train-batch", default="1")
+    ap.add_argument("--beta-kl", default="0.05")
     ap.add_argument("--stdout-artifact", action="store_true")
     ap.add_argument("--stdout-artifact-max-mb", type=float, default=256.0)
     args, _ = ap.parse_known_args()
@@ -144,27 +153,27 @@ def main():
         "--max-level",
         "3",
         "--candidate-n",
-        "50",
+        args.candidate_n,
         "--probe-k",
-        "8",
+        args.probe_k,
         "--K",
         "8",
         "--max-new",
-        "64",
+        args.max_new,
         "--max-new-eval",
-        "128",
+        args.max_new_eval,
         "--eval-n",
-        "200",
+        args.eval_n,
         "--eval-batch",
         "1",
         "--target-updates",
-        "30",
+        args.target_updates,
         "--max-attempts",
-        "120",
+        args.max_attempts,
         "--train-batch",
-        "1",
+        args.train_batch,
         "--beta-kl",
-        "0.05",
+        args.beta_kl,
         "--prompt-suffix",
         PROMPT_SUFFIX,
         "--chat-template-kwargs",

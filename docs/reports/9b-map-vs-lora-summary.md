@@ -40,17 +40,35 @@
 
 速度没有几十倍：当前训练仍要跑完整 9B forward/backward；Map 只减少 adapter 参数和 optimizer 状态，不能避免 base-model activation、logprob、KL、generation 成本。实测优势主要体现在参数/ckpt 极小、吞吐小幅更高、同预算下效果更稳。
 
+## 收敛检查
+
+| seed0 配置 | Map-G2048 | LoRA-r8 |
+|---|---:|---:|
+| 30-budget eval acc | 0.385 | 0.310 |
+| 100-budget eval acc | 0.360 | 0.375 |
+| 100-budget valid updates | 91 / 100 | 41 / 100 |
+| 100-budget skipped groups | 309 | 359 |
+| 100-budget train time | 246.1s | 222.2s |
+
+结论：30 updates 不是数学意义的“最终收敛”，但继续同一 active-bank 训练到 100-budget 没有提升 Map；Map 从 0.385 降到 0.360。LoRA 从 0.310 升到 0.375，但 400 attempts 只拿到 41 个有效 updates，说明这套 active-bank 信号在长训中大量退化为 zero-variance。当前数据支持早停/多 seed，而不是继续堆同一 bank 的步数。
+
 ## 产物
 
 | 产物 | 路径 |
 |---|---|
 | 完整 artifact tar | `results/9b-math500/artifacts/qwen35-active-grpo-artifacts-partial.tar.gz` |
+| 收敛检查 artifact tar | `results/9b-math500/artifacts/qwen35-conv-seed0-u100-20260708-artifacts.tar.gz` |
 | 可读结果目录 | `results/9b-math500/qwen35-active-grpo-20260707/` |
+| 收敛检查目录 | `results/9b-math500/qwen35-conv-seed0-u100-20260708/` |
 | 聚合 JSON | `results/9b-math500/qwen35_figures/qwen35_latest_summary.json` |
+| 收敛检查 JSON | `results/9b-math500/qwen35_figures/qwen35_convergence_summary.json` |
 | seed CSV | `results/9b-math500/qwen35_figures/qwen35_seed_results.csv` |
 | accuracy 图 | `results/9b-math500/qwen35_figures/qwen35_accuracy_by_seed.png` |
 | tokens/s 图 | `results/9b-math500/qwen35_figures/qwen35_tokens_s_by_seed.png` |
 | train curve 图 | `results/9b-math500/qwen35_figures/qwen35_train_correct_curves.png` |
+| 收敛 eval 图 | `results/9b-math500/qwen35_figures/qwen35_convergence_eval_seed0.png` |
+| 收敛 curve 图 | `results/9b-math500/qwen35_figures/qwen35_convergence_curves_seed0.png` |
 | Map 参数 seed0 | `results/9b-math500/qwen35-active-grpo-20260707/seed0-map/map_params/Map-G2048_active_o.json` |
 | Map 参数 seed1 | `results/9b-math500/qwen35-active-grpo-20260707/seed1-map/map_params/Map-G2048_active_o.json` |
 | Map 参数 seed2 | `results/9b-math500/qwen35-active-grpo-20260707/seed2-map/map_params/Map-G2048_active_o.json` |
+| Map 参数 seed0 100-budget | `results/9b-math500/qwen35-conv-seed0-u100-20260708/seed0-map/map_params/Map-G2048_active_o.json` |
