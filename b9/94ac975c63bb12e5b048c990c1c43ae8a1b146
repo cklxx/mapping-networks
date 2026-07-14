@@ -1,0 +1,25 @@
+experiments/math500_active_grpo_9b.py
+  s_3a1009be1df54f::t_d97c773f3691a2 10,116,119-121,124,126,144,171,174-177,185,187,206,218,221,229-230,233-243,262-301,340,545-550,604,607-608,615-616,627-636,642-644,657,814-816,864-866,883-886
+scripts/deploy_qwen35_lora_sweep_colab.sh
+  s_3a1009be1df54f::t_991f6ee4b86a9a 1-90
+scripts/run_qwen35_lora_sweep_colab.py
+  s_3a1009be1df54f::t_820c31487f9dbc 1-252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b994ac975c63bb12e5b048c990c1c43ae8a1b146",
+  "prompts": {},
+  "sessions": {
+    "s_3a1009be1df54f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "19690b33-c868-43d4-99b6-a7cc12ef9ea8",
+        "model": "unknown"
+      },
+      "human_author": "cklxx <q1293822641@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
