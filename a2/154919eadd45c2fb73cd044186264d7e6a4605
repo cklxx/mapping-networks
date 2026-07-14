@@ -1,0 +1,25 @@
+scripts/decode_artifact.py
+  s_3a1009be1df54f::t_61f5a3005282d7 1-26
+scripts/deploy_qwen35_lora_sweep_colab.sh
+  s_3a1009be1df54f::t_6f6f39ba9813a1 2,4-8,12-13,18,27,29-30,32-45,47-56,59-61
+scripts/run_qwen35_lora_sweep_colab.py
+  s_3a1009be1df54f::t_85ca4112028596 3-4,6-8,10,22-23,92-98,101-102,104,125-128,135,155-161,166,174-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a2154919eadd45c2fb73cd044186264d7e6a4605",
+  "prompts": {},
+  "sessions": {
+    "s_3a1009be1df54f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "19690b33-c868-43d4-99b6-a7cc12ef9ea8",
+        "model": "unknown"
+      },
+      "human_author": "cklxx <q1293822641@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
