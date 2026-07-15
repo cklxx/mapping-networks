@@ -1,0 +1,23 @@
+scripts/deploy_qwen35_lora_sweep_colab.sh
+  s_3a1009be1df54f::t_8985c871c668ca 42
+scripts/run_qwen35_lora_sweep_colab.py
+  s_3a1009be1df54f::t_4b850b554d5c28 120,139-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1eafa57fe0bf4cb0a45c85fb34a0c07eccfd05d0",
+  "prompts": {},
+  "sessions": {
+    "s_3a1009be1df54f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "19690b33-c868-43d4-99b6-a7cc12ef9ea8",
+        "model": "unknown"
+      },
+      "human_author": "cklxx <q1293822641@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
