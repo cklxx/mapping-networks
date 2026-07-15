@@ -1,0 +1,21 @@
+experiments/math500_active_grpo_9b.py
+  s_3a1009be1df54f::t_907a9a7a41d61b 772-777,783,789-796,807-808
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4cad1416fbc356344b0f293a8d5614b175e2319e",
+  "prompts": {},
+  "sessions": {
+    "s_3a1009be1df54f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "19690b33-c868-43d4-99b6-a7cc12ef9ea8",
+        "model": "unknown"
+      },
+      "human_author": "cklxx <q1293822641@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
