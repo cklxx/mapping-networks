@@ -108,8 +108,8 @@ def main():
     ap.add_argument("--max-new", default="64")
     ap.add_argument("--max-new-eval", default="128")
     ap.add_argument("--eval-n", default="200")
-    ap.add_argument("--train-batch", default="2")
-    ap.add_argument("--micro-batch", default="2")
+    ap.add_argument("--train-batch", default="1")
+    ap.add_argument("--micro-batch", default="1")
     ap.add_argument("--beta-kl", default="0.05")
     ap.add_argument("--target-updates", default="50")
     ap.add_argument("--max-attempts", default="200")
@@ -136,6 +136,9 @@ def main():
     # pipes). A heartbeat thread provides visible progress instead.
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     os.environ["PYTHONUNBUFFERED"] = "1"
+    # expandable_segments reduces fragmentation (the OOM error itself
+    # recommends this). Reduces peak memory for the 9B GRPO training.
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     # HF_TOKEN must be passed via --hf-token (colab run does not forward
     # local env vars to the remote VM). Set it before any download so the
     # subprocess inherits it.

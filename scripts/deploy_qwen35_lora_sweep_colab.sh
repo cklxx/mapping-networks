@@ -22,7 +22,8 @@ TIME_BUDGET_S="${TIME_BUDGET_S:-1200}"
 CANDIDATE_N="${CANDIDATE_N:-100}"
 MAX_NEW="${MAX_NEW:-64}"
 EVAL_N="${EVAL_N:-200}"
-MICRO_BATCH="${MICRO_BATCH:-2}"
+MICRO_BATCH="${MICRO_BATCH:-1}"
+TRAIN_BATCH="${TRAIN_BATCH:-1}"
 LORA_VARIANTS="${LORA_VARIANTS:-}"
 LOG="/tmp/colab-qwen35-lora-sweep-$(date +%Y%m%d-%H%M).log"
 
@@ -36,6 +37,7 @@ SCRIPT_ARGS=(
   --max-new "$MAX_NEW"
   --eval-n "$EVAL_N"
   --micro-batch "$MICRO_BATCH"
+  --train-batch "$TRAIN_BATCH"
   --target-updates "$TARGET_UPDATES"
   --max-attempts "$MAX_ATTEMPTS"
   --time-budget-s "$TIME_BUDGET_S"
@@ -49,6 +51,7 @@ HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN env var first}" \
 PYTHONUNBUFFERED=1 \
 HF_XET_HIGH_PERFORMANCE=1 \
 HF_HUB_DISABLE_PROGRESS_BARS=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   colab run \
     --gpu "$GPU" \
     --timeout "$TIMEOUT" \
