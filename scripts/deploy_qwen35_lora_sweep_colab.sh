@@ -16,9 +16,10 @@ cd "$(dirname "$0")/.."   # repo root
 
 GPU="${GPU:-G4}"
 TIMEOUT="${TIMEOUT:-86400}"
-TARGET_UPDATES="${TARGET_UPDATES:-50}"
+TARGET_UPDATES="${TARGET_UPDATES:-100}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-200}"
 TIME_BUDGET_S="${TIME_BUDGET_S:-1200}"
+BANK_REFRESH_INTERVAL="${BANK_REFRESH_INTERVAL:-0}"
 CANDIDATE_N="${CANDIDATE_N:-100}"
 MAX_NEW="${MAX_NEW:-64}"
 EVAL_N="${EVAL_N:-200}"
@@ -41,6 +42,7 @@ SCRIPT_ARGS=(
   --target-updates "$TARGET_UPDATES"
   --max-attempts "$MAX_ATTEMPTS"
   --time-budget-s "$TIME_BUDGET_S"
+  --bank-refresh-interval "$BANK_REFRESH_INTERVAL"
   --hf-token "$HF_TOKEN"
 )
 if [[ -n "$LORA_VARIANTS" ]]; then

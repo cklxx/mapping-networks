@@ -1,3 +1,0 @@
-trainable params:  LoRA=3637248   Mapping=256
-GSM8K acc (n=60):  baseline=0.4167   LoRA-RL=0.3167   Mapping-RL=0.3500
-verdict: 256-param latent did NOT improve GSM8K (0.417->0.350, -0.067); LoRA=0.317 with 3637248 params (14208x more params than Mapping's 256).

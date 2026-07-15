@@ -10,9 +10,13 @@ import csv
 import gc
 import json
 import os
+import platform
+import random
+import subprocess
 import sys
 import time
 
+import numpy
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -67,6 +71,46 @@ def append_jsonl(path, obj):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def write_reproducibility(path, args, dev):
+    """Write a reproducibility.json capturing the exact environment + config."""
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        ).decode().strip()
+    except Exception:
+        git_commit = "unknown"
+    env_masked = {}
+    for k, v in sorted(os.environ.items()):
+        if "TOKEN" in k or "KEY" in k or "SECRET" in k:
+            env_masked[k] = "***MASKED***"
+        else:
+            env_masked[k] = v
+    cuda_info = {}
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        cuda_info = {
+            "device_name": torch.cuda.get_device_name(0),
+            "total_memory_gb": round(props.total_memory / 1024**3, 2),
+            "cuda_available": True,
+        }
+    else:
+        cuda_info = {"cuda_available": False}
+    import transformers
+    payload = {
+        "git_commit": git_commit,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "transformers_version": transformers.__version__,
+        "args": vars(args),
+        "env": env_masked,
+        "cuda": cuda_info,
+        "device": dev,
+    }
+    write_json(path, payload)
 
 
 def build_prompt(tok, q, prompt_suffix="", chat_template_kwargs=None, system_prompt=None):
@@ -501,7 +545,7 @@ def save_curve(root, key, events):
     write_json(os.path.join(root, "curves", f"{key}.json"), events)
 
 
-def train_variant(model, tok, names, active, args, dev, kind, result_root):
+def train_variant(model, tok, names, active, args, dev, kind, result_root, bank_builder=None):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -530,6 +574,7 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
 
     events, skipped = [], []
     update = 0
+    updates_since_refresh = 0
     t_start = time.time()
     gen_extra = args.gen_extra
     stop_ids = args.stop_ids
@@ -539,6 +584,46 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         if args.time_budget_s > 0 and time.time() - t_start >= args.time_budget_s:
             print(f"[{key}] time budget hit at attempt={attempt} update={update}", flush=True)
             break
+
+        # Bank refresh: rebuild the active bank every N updates to avoid staleness.
+        if (
+            args.bank_refresh_interval > 0
+            and bank_builder is not None
+            and updates_since_refresh >= args.bank_refresh_interval
+        ):
+            print(
+                f"[{key}] refreshing active bank after {updates_since_refresh} updates "
+                f"(interval={args.bank_refresh_interval})",
+                flush=True,
+            )
+            new_bank = bank_builder()
+            active = new_bank["active"]
+            updates_since_refresh = 0
+            refresh_path = os.path.join(
+                result_root, f"active_bank_refresh_{key}_update{update}.json"
+            )
+            write_json(refresh_path, new_bank)
+            refresh_event = {
+                "event": "bank_refresh",
+                "variant": key,
+                "update": update,
+                "attempt": attempt,
+                "active_n": len(active),
+                "bank_summary": new_bank.get("summary", {}),
+                "path": refresh_path,
+            }
+            events.append(refresh_event)
+            append_jsonl(os.path.join(result_root, "progress.jsonl"), refresh_event)
+            # model.generate() re-enables use_cache; reset so training forwards don't
+            # leak KV caches after the bank rebuild.
+            model.config.use_cache = False
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(
+                f"[{key}] bank refreshed: active_n={len(active)} -> {refresh_path}",
+                flush=True,
+            )
+
         t0 = time.time()
         gc.collect()
         torch.cuda.empty_cache()
@@ -657,6 +742,7 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
             flush=True,
         )
         update += 1
+        updates_since_refresh += 1
         if args.convergence_correct > 0 and e["correct_mean"] >= args.convergence_correct:
             print(
                 f"[{key}] convergence target hit: correct_mean={e['correct_mean']:.3f} "
@@ -787,6 +873,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="Enable deterministic mode (cudnn.deterministic=True, cudnn.benchmark=False).")
+    ap.add_argument("--bank-refresh-interval", type=int, default=0,
+                    help="Rebuild active bank every N updates; 0 = no refresh (backward compatible).")
     ap.add_argument("--n-eval", type=int, default=200)
     ap.add_argument("--min-level", type=int, default=3)
     ap.add_argument("--max-level", type=int, default=5)
@@ -831,6 +921,12 @@ def main():
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    numpy.random.seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    if args.deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     os.makedirs(args.out_dir, exist_ok=True)
     dev = args.device
     dt = torch.bfloat16 if args.dtype == "bf16" else torch.float16
@@ -868,6 +964,8 @@ def main():
         model.gradient_checkpointing_enable()
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
+
+    write_reproducibility(os.path.join(args.out_dir, "reproducibility.json"), args, dev)
 
     ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
     eval_records = [r for r in ds][:args.n_eval]
@@ -907,10 +1005,21 @@ def main():
             gen_extra, stop_ids, "baseline",
         )
 
+    def bank_builder():
+        # Always rebuild with the current (adapted) model; ignore any cached bank JSON
+        # so refresh actually re-probes the candidate pool.
+        saved = args.active_bank_json
+        args.active_bank_json = ""
+        try:
+            return build_active_bank(model, tok, ds, args, dev, gen_extra, stop_ids)
+        finally:
+            args.active_bank_json = saved
+
     summaries = {}
     for variant in [x.strip() for x in args.variants.split(",") if x.strip()]:
         summaries[variant] = train_variant(
-            model, tok, names, bank["active"], args, dev, variant, args.out_dir
+            model, tok, names, bank["active"], args, dev, variant, args.out_dir,
+            bank_builder=bank_builder,
         )
     payload = {
         "model": args.model,

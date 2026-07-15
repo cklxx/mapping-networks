@@ -111,10 +111,14 @@ def main():
     ap.add_argument("--train-batch", default="1")
     ap.add_argument("--micro-batch", default="1")
     ap.add_argument("--beta-kl", default="0.05")
-    ap.add_argument("--target-updates", default="50")
+    ap.add_argument("--target-updates", default="100")
     ap.add_argument("--max-attempts", default="200")
     ap.add_argument("--time-budget-s", default="1200")  # 20min per variant
-    ap.add_argument("--lora-variants", default="")  # override: "r8-lr1e-4,r8-lr3e-4"
+    ap.add_argument("--bank-refresh-interval", default="0",
+                    help="Rebuild active bank every N updates; 0 = no refresh.")
+    ap.add_argument("--lora-variants", default="r8-lr3e-5",
+                    help="Comma-separated LoRA variant labels. Default: best LoRA (r8-lr3e-5). "
+                         "All variants in DEFAULT_LORA_VARIANTS are available.")
     ap.add_argument("--stdout-artifact", action="store_true")
     ap.add_argument("--stdout-artifact-max-mb", type=float, default=256.0)
     ap.add_argument("--hf-token", default="", help="HF token (colab run does not forward env vars)")
@@ -212,6 +216,7 @@ def main():
         "--micro-batch", args.micro_batch,
         "--beta-kl", args.beta_kl,
         "--time-budget-s", args.time_budget_s,
+        "--bank-refresh-interval", args.bank_refresh_interval,
         "--prompt-suffix", PROMPT_SUFFIX,
         "--chat-template-kwargs", CHAT_KWARGS,
         "--eval-after-train",
