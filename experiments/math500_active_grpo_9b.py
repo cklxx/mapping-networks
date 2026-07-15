@@ -7,6 +7,7 @@ schedule still produced zero-variance groups.
 
 import argparse
 import csv
+import gc
 import json
 import os
 import sys
@@ -112,12 +113,17 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
             top_p=top_p,
             num_return_sequences=K,
             max_new_tokens=max_new,
+            use_cache=False,
             **gen_extra,
         )
+    gen_cpu = gen.detach().cpu()
+    del gen
+    torch.cuda.empty_cache()
     rows = []
     for k in range(K):
-        comp_raw = gen[k, pids.numel():]
+        comp_raw = gen_cpu[k, pids.numel():]
         comp, stopped = trim_completion(comp_raw, stop_ids)
+        comp = comp.to(dev).clone()  # GPU tensor, independent of gen_cpu
         text = tok.decode(comp, skip_special_tokens=True)
         pred = extract_answer(text)
         has_boxed = extract_last_braced(text, "\\boxed{") is not None
@@ -135,6 +141,7 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
             "stopped": bool(stopped),
             "length": int(comp.numel()),
         })
+    del gen
     return pids, rows
 
 
@@ -161,8 +168,13 @@ def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extr
             top_p=top_p,
             num_return_sequences=K,
             max_new_tokens=max_new,
+            use_cache=False,
             **gen_extra,
         )
+    # Move gen to CPU immediately so GPU memory is released before we extract views.
+    gen_cpu = gen.detach().cpu()
+    del gen
+    torch.cuda.empty_cache()
     prompt_width = enc.input_ids.shape[1]
     groups = []
     for i, item in enumerate(items):
@@ -170,8 +182,9 @@ def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extr
         samples = []
         for k in range(K):
             row = i * K + k
-            comp_raw = gen[row, prompt_width:]
+            comp_raw = gen_cpu[row, prompt_width:]
             comp, stopped = trim_completion(comp_raw, stop_ids)
+            comp = comp.to(dev).clone()  # GPU tensor, independent of gen_cpu
             text = tok.decode(comp, skip_special_tokens=True)
             pred = extract_answer(text)
             has_boxed = extract_last_braced(text, "\\boxed{") is not None
@@ -190,6 +203,7 @@ def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extr
                 "length": int(comp.numel()),
             })
         groups.append((item, pids, samples))
+    del gen  # free generation output; comps are now independent clones
     return groups
 
 
@@ -201,10 +215,10 @@ def comp_logp_and_kl(model, names, prompt_ids, comp_ids, dev):
     tgt_comp = tgt[comp_start:]
 
     with torch.no_grad(), base_forward(model, names):
-        base_logits = model(ids).logits[0, comp_start:-1].float()
+        base_logits = model(ids, use_cache=False).logits[0, comp_start:-1].float()
         base_logp = torch.log_softmax(base_logits, -1)
 
-    logits = model(ids).logits[0, comp_start:-1].float()
+    logits = model(ids, use_cache=False).logits[0, comp_start:-1].float()
     logp = torch.log_softmax(logits, -1)
     tok_lp = logp.gather(1, tgt_comp[:, None]).squeeze(1)
     p = logp.exp()
@@ -212,13 +226,21 @@ def comp_logp_and_kl(model, names, prompt_ids, comp_ids, dev):
     return tok_lp.sum(), kl
 
 
-def batched_logp_and_kl(model, names, prompt_ids_list, comps, pad_id, beta_kl):
+def batched_logp_and_kl(model, names, prompt_ids_list, comps, pad_id, beta_kl,
+                        adv=None, micro_batch=0):
     """One policy forward/backward for all selected GRPO samples.
 
-    If beta_kl is zero, skip the base forward entirely. With KL enabled this is
-    the minimum exact path for the current objective: one policy forward plus one
-    no-grad base forward for all B*K completions that survived zero-variance
-    filtering.
+    If `adv` is given, returns the scalar GRPO loss (advantage-weighted logp
+    plus KL penalty) so the forward graph is built and freed per chunk; the
+    per-token logits [B,T,V] are never materialized for the whole batch at once.
+    Otherwise returns (sum_lp, kl) per sample for logging.
+
+    If beta_kl is zero, the base forward is skipped entirely. With KL enabled
+    this is the minimum exact path: one policy forward plus one no-grad base
+    forward per chunk for the B*K completions that survived zero-variance
+    filtering. `micro_batch` chunks the forward to bound peak memory (0 = one
+    chunk). Logits stay in the model dtype (bf16) instead of being upcast to
+    float32, halving the logits memory footprint.
     """
     batch = len(comps)
     prompt_lens = [p.numel() for p in prompt_ids_list]
@@ -237,21 +259,46 @@ def batched_logp_and_kl(model, names, prompt_ids_list, comps, pad_id, beta_kl):
         attn[i, :prompt_len + clen] = True
         mask[i, prompt_len - 1:prompt_len + clen - 1] = True
 
-    target = ids[:, 1:]
-    logits = model(ids, attention_mask=attn).logits[:, :-1, :].float()
-    logp = torch.log_softmax(logits, -1)
-    tok_lp = logp.gather(2, target[:, :, None]).squeeze(2)
-    sum_lp = (tok_lp * mask).sum(1)
-
-    if beta_kl <= 0:
-        return sum_lp, torch.zeros(batch, device=dev)
-
-    with torch.no_grad(), base_forward(model, names):
-        base_logits = model(ids, attention_mask=attn).logits[:, :-1, :].float()
-        base_logp = torch.log_softmax(base_logits, -1)
-    token_kl = (logp.exp() * (logp - base_logp)).sum(-1)
-    denom = mask.sum(1).clamp_min(1)
-    kl = (token_kl * mask).sum(1) / denom
+    chunk = batch if micro_batch <= 0 else min(batch, micro_batch)
+    sum_lp_all = []
+    kl_all = []
+    # Accumulate the GRPO loss as a scalar sum of per-chunk means so each chunk's
+    # forward graph is freed before the next chunk starts (prevents ~6GB/update growth
+    # from concatenating graph-bearing tensors across all chunks).
+    total_loss = None
+    for s in range(0, batch, chunk):
+        e = min(s + chunk, batch)
+        ids_c, attn_c, mask_c = ids[s:e], attn[s:e], mask[s:e]
+        target_c = ids_c[:, 1:]
+        logits = model(ids_c, attention_mask=attn_c, use_cache=False).logits[:, :-1, :]
+        logp = torch.log_softmax(logits, -1)
+        tok_lp = logp.gather(2, target_c[:, :, None]).squeeze(2)
+        sum_lp_c = (tok_lp * mask_c).sum(1)
+        if beta_kl > 0:
+            with torch.no_grad(), base_forward(model, names):
+                base_logits = model(ids_c, attention_mask=attn_c, use_cache=False).logits[:, :-1, :]
+                base_logp = torch.log_softmax(base_logits, -1)
+            token_kl = (logp.exp() * (logp - base_logp)).sum(-1)
+            denom = mask_c.sum(1).clamp_min(1)
+            kl_c = (token_kl * mask_c).sum(1) / denom
+        else:
+            kl_c = torch.zeros(e - s, device=dev)
+        sum_lp_all.append(sum_lp_c.detach())
+        kl_all.append(kl_c.detach())
+        if adv is not None:
+            adv_c = adv[s:e]
+            chunk_loss = (-(adv_c * sum_lp_c) + beta_kl * kl_c).mean()
+            total_loss = chunk_loss if total_loss is None else total_loss + chunk_loss
+        # Free this chunk's graph before the next forward pass.
+        del logits, logp, tok_lp, sum_lp_c
+        if beta_kl > 0:
+            del base_logits, base_logp, token_kl, kl_c
+        torch.cuda.empty_cache()
+    sum_lp = torch.cat(sum_lp_all)
+    kl = torch.cat(kl_all)
+    if adv is not None:
+        n_chunks = (batch + chunk - 1) // chunk
+        return total_loss / n_chunks, sum_lp, kl
     return sum_lp, kl
 
 
@@ -290,6 +337,7 @@ def evaluate(model, tok, items, dev, max_new_eval, eval_batch, gen_extra, stop_i
             **enc,
             do_sample=False,
             max_new_tokens=max_new_eval,
+            use_cache=False,
             **gen_extra,
         )
         gen = out[:, enc.input_ids.shape[1]:]
@@ -494,6 +542,12 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
             print(f"[{key}] time budget hit at attempt={attempt} update={update}", flush=True)
             break
         t0 = time.time()
+        gc.collect()
+        torch.cuda.empty_cache()
+        if update % 5 == 0:
+            _ma = torch.cuda.memory_allocated() / 1024**3
+            _mr = torch.cuda.memory_reserved() / 1024**3
+            print(f"[{key}] mem_pre update={update} alloc={_ma:.2f}GB reserved={_mr:.2f}GB", flush=True)
         batch_items = [
             active[(attempt * args.train_batch + i) % len(active)]
             for i in range(args.train_batch)
@@ -547,19 +601,21 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
             continue
 
         opt.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
         prompt_batch = [pids for pids, _ in selected]
         comps = [sample["comp"] for _, sample in selected]
-        logps, kls = batched_logp_and_kl(
+        adv_tensor = torch.stack(selected_adv).to(dev).detach()
+        loss, logps, kls = batched_logp_and_kl(
             model,
             names,
             prompt_batch,
             comps,
             args.gen_extra["pad_token_id"],
             args.beta_kl,
+            adv=adv_tensor,
+            micro_batch=args.micro_batch,
         )
         tokens = sum(pids.numel() + comp.numel() for pids, comp in zip(prompt_batch, comps))
-        adv_tensor = torch.stack(selected_adv).to(dev).detach()
-        loss = (-(adv_tensor * logps) + args.beta_kl * kls).mean()
         loss.backward()
         opt.step()
         if kind == "map":
@@ -568,14 +624,24 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         kl_mean = float(kls.detach().mean().item())
         correct_mean = sum(e["correct_mean"] for e in group_events) / len(group_events)
         shaped_mean = sum(e["shaped_mean"] for e in group_events) / len(group_events)
+        n_groups = len(groups)
+        n_active = len(group_events)
+        # free GPU tensors now that scalars are extracted
+        del loss, logps, kls, adv_tensor, prompt_batch, comps, selected, groups
+        gc.collect()
+        torch.cuda.empty_cache()
+        if update % 5 == 0:
+            _ma = torch.cuda.memory_allocated() / 1024**3
+            _mr = torch.cuda.memory_reserved() / 1024**3
+            print(f"[{key}] mem_post update={update} alloc={_ma:.2f}GB reserved={_mr:.2f}GB", flush=True)
         e = dict(
             event="update",
             variant=key,
             attempt=attempt,
             update=update,
-            groups=len(groups),
-            active_groups=len(group_events),
-            skipped_groups=len(groups) - len(group_events),
+            groups=n_groups,
+            active_groups=n_active,
+            skipped_groups=n_groups - n_active,
             group_events=group_events,
             correct_mean=correct_mean,
             shaped_mean=shaped_mean,
@@ -588,7 +654,7 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root):
         events.append(e)
         append_jsonl(os.path.join(result_root, "progress.jsonl"), e)
         print(
-            f"[{key}] update={update} attempt={attempt} groups={len(group_events)}/{len(groups)} "
+            f"[{key}] update={update} attempt={attempt} groups={n_active}/{n_groups} "
             f"correct={correct_mean:.3f} shaped={shaped_mean:.3f} kl={kl_mean:.4f}",
             flush=True,
         )
@@ -745,6 +811,9 @@ def main():
     ap.add_argument("--target-updates", type=int, default=20)
     ap.add_argument("--max-attempts", type=int, default=60)
     ap.add_argument("--train-batch", type=int, default=1)
+    ap.add_argument("--micro-batch", type=int, default=0,
+                    help="logp/KL forward chunk size; 0 = whole batch at once. "
+                         "Set smaller (e.g. 4) to cut peak [B,T,V] logits memory.")
     ap.add_argument("--time-budget-s", type=float, default=0.0)
     ap.add_argument("--convergence-correct", type=float, default=0.0)
     ap.add_argument("--format-weight", type=float, default=0.1)
@@ -792,6 +861,9 @@ def main():
         load_kwargs["attn_implementation"] = args.attn_impl
     model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs).to(dev)
     model.requires_grad_(False)
+    model.config.use_cache = False  # generate() re-enables it per-call; default off for training
+    if hasattr(model, "generation_config"):
+        model.generation_config.use_cache = False
     try:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     except TypeError:
@@ -808,6 +880,10 @@ def main():
     bank = build_active_bank(model, tok, ds, args, dev, gen_extra, stop_ids)
     write_json(os.path.join(args.out_dir, "active_bank.json"), bank)
     print("ACTIVE_BANK_SUMMARY " + json.dumps(bank["summary"], separators=(",", ":")), flush=True)
+    # model.generate() enables use_cache; reset so training forwards don't leak KV caches.
+    model.config.use_cache = False
+    gc.collect()
+    torch.cuda.empty_cache()
     if not bank["active"]:
         raise RuntimeError("no active prompts found")
     if args.require_bank_gate:
