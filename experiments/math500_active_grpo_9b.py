@@ -141,7 +141,6 @@ def sample_one(model, tok, q, gold, dev, K, max_new, temperature, top_p, gen_ext
             "stopped": bool(stopped),
             "length": int(comp.numel()),
         })
-    del gen
     return pids, rows
 
 
@@ -203,7 +202,6 @@ def sample_many(model, tok, items, dev, K, max_new, temperature, top_p, gen_extr
                 "length": int(comp.numel()),
             })
         groups.append((item, pids, samples))
-    del gen  # free generation output; comps are now independent clones
     return groups
 
 
