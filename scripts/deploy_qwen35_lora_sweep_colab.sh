@@ -39,6 +39,7 @@ SCRIPT_ARGS=(
   --target-updates "$TARGET_UPDATES"
   --max-attempts "$MAX_ATTEMPTS"
   --time-budget-s "$TIME_BUDGET_S"
+  --hf-token "$HF_TOKEN"
 )
 if [[ -n "$LORA_VARIANTS" ]]; then
   SCRIPT_ARGS+=(--lora-variants "$LORA_VARIANTS")

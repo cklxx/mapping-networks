@@ -117,6 +117,7 @@ def main():
     ap.add_argument("--lora-variants", default="")  # override: "r8-lr1e-4,r8-lr3e-4"
     ap.add_argument("--stdout-artifact", action="store_true")
     ap.add_argument("--stdout-artifact-max-mb", type=float, default=256.0)
+    ap.add_argument("--hf-token", default="", help="HF token (colab run does not forward env vars)")
     args, _ = ap.parse_known_args()
 
     workdir = Path(args.workdir)
@@ -135,7 +136,10 @@ def main():
     # pipes). A heartbeat thread provides visible progress instead.
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     os.environ["PYTHONUNBUFFERED"] = "1"
-    _hf_token = os.environ.get("HF_TOKEN", "")
+    # HF_TOKEN must be passed via --hf-token (colab run does not forward
+    # local env vars to the remote VM). Set it before any download so the
+    # subprocess inherits it.
+    _hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
     if _hf_token:
         os.environ["HF_TOKEN"] = _hf_token
 
