@@ -769,27 +769,31 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root, bank_
         write_json(os.path.join(result_root, "map_params", "Map-G2048_active_o.json"), payload)
     checkpoint_bytes_est = n_trainable * (2 if args.dtype == "bf16" else 2)
     restore(model, names, originals)
-    total_s = sum(e["step_s"] for e in events)
-    total_tokens = sum(e["tokens"] for e in events)
+    # events mixes training updates (event="update") with bank_refresh events
+    # (event="bank_refresh", no step_s/tokens/correct_mean). Compute training
+    # stats only from update events; keep the full events list in the output.
+    train_events = [e for e in events if e.get("event") == "update"]
+    total_s = sum(e["step_s"] for e in train_events)
+    total_tokens = sum(e["tokens"] for e in train_events)
     return {
         "variant": key,
         "kind": kind,
         "trainable_params": n_trainable,
         "checkpoint_bytes_est": checkpoint_bytes_est,
-        "updates": len(events),
+        "updates": len(train_events),
         "skipped": len(skipped),
         "target_updates": args.target_updates,
         "max_attempts": args.max_attempts,
         "time_budget_s": args.time_budget_s,
         "elapsed_train_s": time.time() - t_start,
-        "correct_curve": [e["correct_mean"] for e in events],
-        "shaped_curve": [e["shaped_mean"] for e in events],
-        "kl_curve": [e["kl"] for e in events],
-        "best_correct_mean": max([e["correct_mean"] for e in events], default=0.0),
-        "final_correct_mean": events[-1]["correct_mean"] if events else 0.0,
-        "best_shaped_mean": max([e["shaped_mean"] for e in events], default=0.0),
-        "final_shaped_mean": events[-1]["shaped_mean"] if events else 0.0,
-        "mean_step_s": total_s / max(1, len(events)),
+        "correct_curve": [e["correct_mean"] for e in train_events],
+        "shaped_curve": [e["shaped_mean"] for e in train_events],
+        "kl_curve": [e["kl"] for e in train_events],
+        "best_correct_mean": max([e["correct_mean"] for e in train_events], default=0.0),
+        "final_correct_mean": train_events[-1]["correct_mean"] if train_events else 0.0,
+        "best_shaped_mean": max([e["shaped_mean"] for e in train_events], default=0.0),
+        "final_shaped_mean": train_events[-1]["shaped_mean"] if train_events else 0.0,
+        "mean_step_s": total_s / max(1, len(train_events)),
         "tokens_per_s": total_tokens / max(1e-9, total_s),
         "peak_alloc_gb": (
             torch.cuda.max_memory_allocated() / 1024**3
@@ -800,8 +804,8 @@ def train_variant(model, tok, names, active, args, dev, kind, result_root, bank_
         "events": events,
         "skipped_events": skipped,
         "pass": (
-            len(events) >= args.target_updates
-            and any(e["correct_mean"] > 0 for e in events)
+            len(train_events) >= args.target_updates
+            and any(e["correct_mean"] > 0 for e in train_events)
             and (eval_result is None or eval_result["n"] > 0)
         ),
     }
