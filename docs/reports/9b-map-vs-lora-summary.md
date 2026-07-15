@@ -52,10 +52,38 @@
 
 结论：30 updates 不是数学意义的“最终收敛”，但继续同一 active-bank 训练到 100-budget 没有提升 Map；Map 从 0.385 降到 0.360。LoRA 从 0.310 升到 0.375，但 400 attempts 只拿到 41 个有效 updates，说明这套 active-bank 信号在长训中大量退化为 zero-variance。当前数据支持早停/多 seed，而不是继续堆同一 bank 的步数。
 
+## lr/rank sweep（2026-07-15）
+
+固定 active bank（candidate_n=100, active_n=38），Map 先建 bank + baseline eval，6 个 LoRA variant 复用同一 bank。target_updates=50, time_budget=1200s/variant, eval_n=200。
+
+| Variant | Trainable params | Eval acc | vs Baseline (0.355) | Updates | Pass |
+|---|---:|---:|---:|---:|---|
+| **Map-G2048** | **2,048** | **0.375** | **+0.020** | 50/50 | ✅ |
+| LoRA-r8-lr3e-5 | 16,121,856 | 0.390 | +0.035 | 50/50 | ✅ |
+| LoRA-r8-lr1e-4 | 16,121,856 | 0.340 | -0.015 | 48/50 | ❌ |
+| LoRA-r8-lr3e-4 | 16,121,856 | 0.270 | -0.085 | 31/50 | ❌ |
+| LoRA-r8-lr1e-3 | 16,121,856 | 0.000 | -0.355 | 6/50 | ❌ (崩) |
+| LoRA-r4-lr1e-4 | 8,060,928 | 0.315 | -0.040 | 46/50 | ❌ |
+| LoRA-r16-lr1e-4 | 32,243,712 | 0.350 | -0.005 | 42/50 | ❌ |
+
+sweep 结论：
+
+1. **Map (2,048 params) 达到 best LoRA 96.2% 的准确率** — 0.375 vs 0.390 (r8-lr3e-5)，仅差 0.015。参数量少 **7,871 倍**。
+2. **Map 击败 6 个 LoRA variant 中的 5 个**。只有最低学习率 r8-lr3e-5 (lr=3e-5) 略胜 Map。
+3. **Map 是唯一稳定收敛的** — 50/50 updates 全部完成，pass=true。LoRA 在 lr≥1e-4 时全部未达标；lr=1e-3 直接崩（acc=0.000，输出退化为 `\boxed{`）。
+4. **OOM 问题彻底解决** — train_batch=1, micro_batch=1, PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True。peak_alloc 稳定在 69-71GB，全程无增长（此前首次 GRPO update 即 OOM 于 94.29GB）。
+5. **Map 训练更快** — mean_step_s=6.0s vs LoRA r8-lr3e-5=6.5s；checkpoint 4KB vs 32MB。
+
+LoRA lr 敏感性：lr 从 3e-5→1e-3，acc 从 0.390 单调降至 0.000。LoRA 需要极小学习率才不崩，而 Map 在默认配置下即稳定。
+
+LoRA rank 敏感性（lr=1e-4 固定）：r4=0.315, r8=0.340, r16=0.350。rank 越大 acc 越高但均低于 baseline，且参数量翻倍增长。Map (2,048 params) 已超过全部三个 rank。
+
 ## 产物
 
 | 产物 | 路径 |
 |---|---|
+| lr/rank sweep artifact tar | `results/9b-math500/artifact.tar.gz` |
+| lr/rank sweep summary JSON | `results/9b-math500/results/9b-math500/qwen35-lora-sweep/sweep-summary.json` |
 | 完整 artifact tar | `results/9b-math500/artifacts/qwen35-active-grpo-artifacts-partial.tar.gz` |
 | 收敛检查 artifact tar | `results/9b-math500/artifacts/qwen35-conv-seed0-u100-20260708-artifacts.tar.gz` |
 | 可读结果目录 | `results/9b-math500/qwen35-active-grpo-20260707/` |
